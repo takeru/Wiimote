@@ -87,7 +87,7 @@ static int scanned_device_list_size = 0;
 #define SCANNED_DEVICE_LIST_SIZE 16
 static scanned_device_t scanned_device_list[SCANNED_DEVICE_LIST_SIZE];
 static int scanned_device_find(struct bd_addr_t bd_addr){
-  return find_in_array((uint8_t*)scanned_device_list, SCANNED_DEVICE_LIST_SIZE, sizeof(scanned_device_t), (uint8_t*)&bd_addr.addr, BD_ADDR_LEN, 0);
+  return find_in_array((uint8_t*)scanned_device_list, scanned_device_list_size, sizeof(scanned_device_t), (uint8_t*)&bd_addr.addr, BD_ADDR_LEN, 0);
 }
 static int scanned_device_add(struct scanned_device_t scanned_device){
   if(SCANNED_DEVICE_LIST_SIZE == scanned_device_list_size){
@@ -111,7 +111,7 @@ static int l2cap_connection_size = 0;
 #define L2CAP_CONNECTION_LIST_SIZE 8
 static l2cap_connection_t l2cap_connection_list[L2CAP_CONNECTION_LIST_SIZE];
 static int l2cap_connection_find(uint16_t connection_handle){
-  return find_in_array((uint8_t*)l2cap_connection_list, L2CAP_CONNECTION_LIST_SIZE, sizeof(l2cap_connection_t), (uint8_t*)&connection_handle, sizeof(uint16_t), 0);
+  return find_in_array((uint8_t*)l2cap_connection_list, l2cap_connection_size, sizeof(l2cap_connection_t), (uint8_t*)&connection_handle, sizeof(uint16_t), 0);
 }
 static int l2cap_connection_add(struct l2cap_connection_t l2cap_connection){
   if(L2CAP_CONNECTION_LIST_SIZE == l2cap_connection_size){
@@ -124,16 +124,15 @@ static void l2cap_connection_clear(void){
   l2cap_connection_size = 0;
 }
 
+static void start_scan(void);
+
 /**
  * callback 
  */
 static void _notify_host_send_available(void){
   if(!hciInit){
-    uint16_t len = make_cmd_reset(tmp_data);
-    if(ESP_OK == _queue_data(_tx_queue, tmp_data, len)){
-      log_d("queued reset.");
-      hciInit = true;
-    }
+    start_scan();
+    hciInit = true;
   }
 }
 
@@ -149,6 +148,14 @@ static const esp_vhci_host_callback_t callback = {
   _notify_host_send_available,
   _notify_host_recv
 };
+
+static void start_scan(void){
+  scanned_device_clear();
+  l2cap_connection_clear();
+  uint16_t len = make_cmd_reset(tmp_data);
+  _queue_data(_tx_queue, tmp_data, len); // TODO: check return 
+  log_d("queued reset.");
+}
 
 static void process_command_complete_event(uint8_t len, uint8_t* data){
     if(data[1]==0x03 && data[2]==0x0C){ // reset
@@ -205,7 +212,7 @@ static void process_command_complete_event(uint8_t len, uint8_t* data){
         log_d("write_scan_enable OK.");
 
         scanned_device_clear();
-        uint16_t len = make_cmd_inquiry(tmp_data, 0x9E8B33, 0x30, 0x00);
+        uint16_t len = make_cmd_inquiry(tmp_data, 0x9E8B33, 0x05/*0x30*/, 0x00);
         _queue_data(_tx_queue, tmp_data, len); // TODO: check return
         log_d("queued inquiry.");
       }else{
@@ -299,6 +306,7 @@ static void process_inquiry_result_event(uint8_t len, uint8_t* data){
 static void process_inquiry_complete_event(uint8_t len, uint8_t* data){
     uint8_t status = data[0];
     log_d("inquiry_complete status=%02X", status);
+    start_scan();
 }
 
 static void process_remote_name_request_complete_event(uint8_t len, uint8_t* data){
@@ -371,11 +379,14 @@ static void process_disconnection_complete_event(uint8_t len, uint8_t* data){
     uint8_t status = data[0];
     log_d("disconnection_complete status=%02X", status);
 
-    uint16_t ch = data[2] << 8 | data[1]; //Connection_Handle // reverse??
+    uint16_t ch = data[2] << 8 | data[1]; //Connection_Handle
     uint8_t reason = data[3];  // Reason
 
     log_d("  Connection_Handle  = 0x%04X", ch);
     log_d("  Reason             = %02X", reason);
+
+    wiimoteConnected = false;
+    start_scan();
 }
 
 static void process_l2cap_connection_response(uint16_t connection_handle, uint8_t* data){
@@ -508,7 +519,25 @@ static void process_l2cap_data(uint16_t connection_handle, uint16_t channel_id, 
     process_l2cap_configuration_request(connection_handle, data);
   }else
   if(data[0]==0xA1){ // HID 0xA1
-    wiimoteConnected = true;
+    if(!wiimoteConnected){
+      int idx = l2cap_connection_find(connection_handle);
+      struct l2cap_connection_t l2cap_connection = l2cap_connection_list[idx];
+
+      uint8_t  packet_boundary_flag = 0b10; // Packet_Boundary_Flag
+      uint8_t  broadcast_flag       = 0b00; // Broadcast_Flag
+      uint16_t channel_id           = l2cap_connection.remote_cid;
+      uint8_t data[] = {
+        0xA2,
+        0x11,
+        0x10 // 0x00 - 0xF0
+      };
+      uint16_t data_len = 3;
+      uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
+      _queue_data(_tx_queue, tmp_data, len); // TODO: check return
+      log_d("queued acl_l2cap_single_packet(Set LEDs)");
+
+      wiimoteConnected = true;
+    }
     process_report(data, len);
   }else{
     log_d("!!! process_l2cap_data no impl !!!");
