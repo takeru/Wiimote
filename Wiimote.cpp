@@ -354,6 +354,108 @@ static void _l2cap_connect(uint16_t connection_handle, uint16_t psm, uint16_t so
     log_d("queued acl_l2cap_single_packet(CONNECTION REQUEST)");
 }
 
+static void _set_led(uint16_t connection_handle, uint8_t leds){
+  int idx = l2cap_connection_find(connection_handle);
+  struct l2cap_connection_t l2cap_connection = l2cap_connection_list[idx];
+
+  uint8_t  packet_boundary_flag = 0b10; // Packet_Boundary_Flag
+  uint8_t  broadcast_flag       = 0b00; // Broadcast_Flag
+  uint16_t channel_id           = l2cap_connection.remote_cid;
+  uint8_t data[] = {
+    0xA2,
+    0x11,
+    leds << 4 // 0x0? - 0xF?
+  };
+  uint16_t data_len = 3;
+  uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
+  _queue_data(_tx_queue, tmp_data, len); // TODO: check return
+  log_d("queued acl_l2cap_single_packet(Set LEDs)");
+}
+
+static void _set_reporting_mode(uint16_t connection_handle, uint8_t reporting_mode, bool continuous){
+  int idx = l2cap_connection_find(connection_handle);
+  struct l2cap_connection_t l2cap_connection = l2cap_connection_list[idx];
+
+  uint8_t  packet_boundary_flag = 0b10; // Packet_Boundary_Flag
+  uint8_t  broadcast_flag       = 0b00; // Broadcast_Flag
+  uint16_t channel_id           = l2cap_connection.remote_cid;
+  uint8_t data[] = {
+    0xA2,
+    0x12,
+    continuous ? 0x04 : 0x00, // 0x00, 0x04
+    reporting_mode
+  };
+  uint16_t data_len = 4;
+  uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
+  _queue_data(_tx_queue, tmp_data, len); // TODO: check return
+  log_d("queued acl_l2cap_single_packet(Set reporting mode)");
+}
+
+enum address_space_t {
+  EEPROM_MEMORY,
+  CONTROL_REGISTER
+};
+
+static uint8_t _address_space(address_space_t as)
+{
+  switch(as){
+    case EEPROM_MEMORY   : return 0x00;
+    case CONTROL_REGISTER: return 0x04;
+  }
+  return 0xFF;
+}
+
+static void _write_memory(uint16_t connection_handle, address_space_t as, uint32_t offset, uint8_t size, const uint8_t* d){
+  int idx = l2cap_connection_find(connection_handle);
+  struct l2cap_connection_t l2cap_connection = l2cap_connection_list[idx];
+
+  uint8_t  packet_boundary_flag = 0b10; // Packet_Boundary_Flag
+  uint8_t  broadcast_flag       = 0b00; // Broadcast_Flag
+  uint16_t channel_id           = l2cap_connection.remote_cid;
+  // (a2) 16 MM FF FF FF SS DD DD DD DD DD DD DD DD DD DD DD DD DD DD DD DD
+  uint8_t data[] = {
+    0xA2,
+    0x16, // Write
+    _address_space(as),    // MM 0x00=EEPROM, 0x04=ControlRegister
+    (offset >> 16) & 0xFF, // FF
+    (offset >>  8) & 0xFF, // FF
+    (offset      ) & 0xFF, // FF
+    size,                  // SS size 1..16
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+  };
+  memcpy(data+7, d, size);
+
+  uint16_t data_len = 7 + 16;
+  uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
+  _queue_data(_tx_queue, tmp_data, len); // TODO: check return
+  log_d("queued acl_l2cap_single_packet(write memory)");
+}
+
+static void _read_memory(uint16_t connection_handle, address_space_t as, uint32_t offset, uint16_t size){
+  int idx = l2cap_connection_find(connection_handle);
+  struct l2cap_connection_t l2cap_connection = l2cap_connection_list[idx];
+
+  uint8_t  packet_boundary_flag = 0b10; // Packet_Boundary_Flag
+  uint8_t  broadcast_flag       = 0b00; // Broadcast_Flag
+  uint16_t channel_id           = l2cap_connection.remote_cid;
+  // (a2) 17 MM FF FF FF SS SS
+  uint8_t data[] = {
+    0xA2,
+    0x17, // Read
+    _address_space(as),    // MM 0x00=EEPROM, 0x04=ControlRegister
+    (offset >> 16) & 0xFF, // FF
+    (offset >>  8) & 0xFF, // FF
+    (offset      ) & 0xFF, // FF
+    (size >> 8   ) & 0xFF, // SS
+    (size        ) & 0xFF  // SS
+  };
+  uint16_t data_len = 8;
+  uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
+  _queue_data(_tx_queue, tmp_data, len); // TODO: check return
+  log_d("queued acl_l2cap_single_packet(read memory)");
+}
+
 static void process_connection_complete_event(uint8_t len, uint8_t* data){
     uint8_t status = data[0];
     log_d("connection_complete status=%02X", status);
@@ -508,6 +610,60 @@ static void process_report(uint8_t* data, uint16_t len){
   }
 }
 
+static void process_extension_controller_reports(uint16_t connection_handle, uint16_t channel_id, uint8_t* data, uint16_t len){
+  static int controller_query_state = 0;
+
+  switch(controller_query_state){
+  case 0:
+    // 0x20 Status
+    // (a1) 20 BB BB LF 00 00 VV
+    if(data[1] == 0x20){
+      if(data[4] & 0x02){ // extension controller is connected
+        _write_memory(connection_handle, CONTROL_REGISTER, 0xA400F0, 1, (const uint8_t[]){0x55});
+        controller_query_state = 1;
+      }else{ // extension controller is NOT connected
+        _set_reporting_mode(connection_handle, 0x30, false); // 0x30: Core Buttons : 30 BB BB
+        //_set_reporting_mode(connection_handle, 0x31, false); // 0x31: Core Buttons and Accelerometer : 31 BB BB AA AA AA
+      }
+    }
+    break;
+  case 1:
+    // A1 22 00 00 16 00 => OK
+    // A1 22 00 00 16 04 => NG
+    if(data[1]==0x22 && data[4]==0x16){
+      if(data[5]==0x00){
+        _write_memory(connection_handle, CONTROL_REGISTER, 0xA400FB, 1, (const uint8_t[]){0x00});
+        controller_query_state = 2;
+      }else{
+        controller_query_state = 0;
+      }
+    }
+    break;
+  case 2:
+    if(data[1]==0x22 && data[4]==0x16){
+      if(data[5]==0x00){
+        _read_memory(connection_handle, CONTROL_REGISTER, 0xA400FA, 6); // read controller type
+        controller_query_state = 3;
+      }else{
+        controller_query_state = 0;
+      }
+    }
+    break;
+  case 3:
+    // 0x21 Read response
+    // (a1) 21 BB BB SE FF FF DD DD DD DD DD DD DD DD DD DD DD DD DD DD DD DD
+    if(data[1] == 0x21){
+      if(memcmp(data+5, (const uint8_t[]){0x00, 0xFA}, 2)==0){
+        if(memcmp(data+7, (const uint8_t[]){0x00, 0x00, 0xA4, 0x20, 0x00, 0x00}, 6)==0){ // Nunchuck
+          _set_reporting_mode(connection_handle, 0x32, false); // 0x32: Core Buttons with 8 Extension bytes : 32 BB BB EE EE EE EE EE EE EE EE
+        }
+        controller_query_state = 0;
+      }
+    }
+    break;
+  }
+}
+
 static void process_l2cap_data(uint16_t connection_handle, uint16_t channel_id, uint8_t* data, uint16_t len){
   if(data[0]==0x03){ // CONNECTION RESPONSE
     process_l2cap_connection_response(connection_handle, data);
@@ -520,24 +676,10 @@ static void process_l2cap_data(uint16_t connection_handle, uint16_t channel_id, 
   }else
   if(data[0]==0xA1){ // HID 0xA1
     if(!wiimoteConnected){
-      int idx = l2cap_connection_find(connection_handle);
-      struct l2cap_connection_t l2cap_connection = l2cap_connection_list[idx];
-
-      uint8_t  packet_boundary_flag = 0b10; // Packet_Boundary_Flag
-      uint8_t  broadcast_flag       = 0b00; // Broadcast_Flag
-      uint16_t channel_id           = l2cap_connection.remote_cid;
-      uint8_t data[] = {
-        0xA2,
-        0x11,
-        0x10 // 0x00 - 0xF0
-      };
-      uint16_t data_len = 3;
-      uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
-      _queue_data(_tx_queue, tmp_data, len); // TODO: check return
-      log_d("queued acl_l2cap_single_packet(Set LEDs)");
-
+      _set_led(connection_handle, 0b0001);
       wiimoteConnected = true;
     }
+    process_extension_controller_reports(connection_handle, channel_id, data, len);
     process_report(data, len);
   }else{
     log_d("!!! process_l2cap_data no impl !!!");
@@ -633,7 +775,7 @@ void Wiimote::handle(){
     //log_d("esp_vhci_host_check_send_available=%d", ok);
     if(ok){
       lendata_t *lendata = NULL;
-      if(xQueueReceive(_tx_queue, &lendata, portMAX_DELAY) == pdTRUE){
+      if(xQueueReceive(_tx_queue, &lendata, 0) == pdTRUE){
         esp_vhci_host_send_packet(lendata->data, lendata->len);
         log_d("SEND => %s", formatHex(lendata->data, lendata->len));
         free(lendata);
@@ -643,7 +785,7 @@ void Wiimote::handle(){
 
   if(uxQueueMessagesWaiting(_rx_queue)){
     lendata_t *lendata = NULL;
-    if(xQueueReceive(_rx_queue, &lendata, portMAX_DELAY) == pdTRUE){
+    if(xQueueReceive(_rx_queue, &lendata, 0) == pdTRUE){
       switch(lendata->data[0]){
       case 0x04:
         process_hci_event(lendata->data[1], lendata->data[2], lendata->data+3);
