@@ -15,10 +15,15 @@
 #include "wiimote_bt.h"
 #include "Wiimote.h"
 
+#define PSM_HID_Control_11   0x0011
+#define PSM_HID_Interrupt_13 0x0013
+
 static uint8_t tmp_data[256];
 static bool hciInit = false;
 static bool wiimoteConnected = false;
 static wiimote_callback_t wiimote_callback[4];
+static uint8_t _g_identifier = 1;
+static uint16_t _g_local_cid = 0x0040;
 
 /**
  * Queue
@@ -54,15 +59,6 @@ static esp_err_t _queue_data(xQueueHandle queue, uint8_t *data, size_t len){
 /**
  * Utils
  */
-static int find_in_array(uint8_t* array, size_t array_size, size_t item_length, uint8_t* data, size_t data_length, size_t alignment){
-  for(int i=0; i<array_size; i++){
-    if(memcmp(array + (item_length*i) + alignment, data, data_length)==0){
-      return i;
-    }
-  }
-  return -1;
-}
-
 #define FORMAT_HEX_MAX_BYTES 30
 static char formatHexBuffer[FORMAT_HEX_MAX_BYTES*3+3+1];
 static char* formatHex(uint8_t* data, uint16_t len){
@@ -86,8 +82,14 @@ struct scanned_device_t {
 static int scanned_device_list_size = 0;
 #define SCANNED_DEVICE_LIST_SIZE 16
 static scanned_device_t scanned_device_list[SCANNED_DEVICE_LIST_SIZE];
-static int scanned_device_find(struct bd_addr_t bd_addr){
-  return find_in_array((uint8_t*)scanned_device_list, scanned_device_list_size, sizeof(scanned_device_t), (uint8_t*)&bd_addr.addr, BD_ADDR_LEN, 0);
+static int scanned_device_find(struct bd_addr_t *bd_addr){
+  for(int i=0; i<scanned_device_list_size; i++){
+    scanned_device_t *c = &scanned_device_list[i];
+    if(memcmp(&bd_addr->addr, c->bd_addr.addr, BD_ADDR_LEN) == 0){
+      return i;
+    }
+  }
+  return -1;
 }
 static int scanned_device_add(struct scanned_device_t scanned_device){
   if(SCANNED_DEVICE_LIST_SIZE == scanned_device_list_size){
@@ -105,14 +107,32 @@ static void scanned_device_clear(void){
  */
 struct l2cap_connection_t {
   uint16_t connection_handle;
+  uint16_t psm;
+  uint16_t local_cid;
   uint16_t remote_cid;
 };
 static int l2cap_connection_size = 0;
 #define L2CAP_CONNECTION_LIST_SIZE 8
 static l2cap_connection_t l2cap_connection_list[L2CAP_CONNECTION_LIST_SIZE];
-static int l2cap_connection_find(uint16_t connection_handle){
-  return find_in_array((uint8_t*)l2cap_connection_list, l2cap_connection_size, sizeof(l2cap_connection_t), (uint8_t*)&connection_handle, sizeof(uint16_t), 0);
+static int l2cap_connection_find_by_psm(uint16_t connection_handle, uint16_t psm){
+  for(int i=0; i<l2cap_connection_size; i++){
+    l2cap_connection_t *c = &l2cap_connection_list[i];
+    if(connection_handle == c->connection_handle && psm == c->psm){
+      return i;
+    }
+  }
+  return -1;
 }
+static int l2cap_connection_find_by_local_cid(uint16_t connection_handle, uint16_t local_cid){
+  for(int i=0; i<l2cap_connection_size; i++){
+    l2cap_connection_t *c = &l2cap_connection_list[i];
+    if(connection_handle == c->connection_handle && local_cid == c->local_cid){
+      return i;
+    }
+  }
+  return -1;
+}
+
 static int l2cap_connection_add(struct l2cap_connection_t l2cap_connection){
   if(L2CAP_CONNECTION_LIST_SIZE == l2cap_connection_size){
     return -1;
@@ -272,7 +292,7 @@ static void process_inquiry_result_event(uint8_t len, uint8_t* data){
 
       log_d("**** inquiry_result BD_ADDR(%d/%d) = %s", i, num, formatHex((uint8_t*)&bd_addr.addr, BD_ADDR_LEN));
 
-      int idx = scanned_device_find(bd_addr);
+      int idx = scanned_device_find(&bd_addr);
       if(idx == -1){
         log_d("    Page_Scan_Repetition_Mode = %02X", data[pos+6]);
         // data[pos+7] data[pos+8] // Reserved
@@ -319,7 +339,7 @@ static void process_remote_name_request_complete_event(uint8_t len, uint8_t* dat
     char* name = (char*)(data+7);
     log_d("  REMOTE_NAME = %s", name);
 
-    int idx = scanned_device_find(bd_addr);
+    int idx = scanned_device_find(&bd_addr);
     if(0<=idx && strcmp("Nintendo RVL-CNT-01", name)==0){
         {
             uint16_t len = make_cmd_inquiry_cancel(tmp_data);
@@ -343,7 +363,7 @@ static void _l2cap_connect(uint16_t connection_handle, uint16_t psm, uint16_t so
     uint16_t channel_id           = 0x0001;
     uint8_t data[] = {
       0x02,                               // CONNECTION REQUEST
-      0x01,                               // Identifier
+      _g_identifier++,                    // Identifier
       0x04, 0x00,                         // Length:     0x0004
       psm        & 0xFF, psm        >> 8, // PSM: HID_Control=0x0011, HID_Interrupt=0x0013
       source_cid & 0xFF, source_cid >> 8  // Source CID: 0x0040+
@@ -352,10 +372,20 @@ static void _l2cap_connect(uint16_t connection_handle, uint16_t psm, uint16_t so
     uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
     _queue_data(_tx_queue, tmp_data, len); // TODO: check return
     log_d("queued acl_l2cap_single_packet(CONNECTION REQUEST)");
+
+    struct l2cap_connection_t l2cap_connection;
+    l2cap_connection.connection_handle = connection_handle;
+    l2cap_connection.psm               = psm;
+    l2cap_connection.local_cid         = source_cid;
+    l2cap_connection.remote_cid        = 0;
+    int idx = l2cap_connection_add(l2cap_connection);
+    if(idx == -1){
+      log_d("!!! l2cap_connection_add failed.");
+    }
 }
 
 static void _set_led(uint16_t connection_handle, uint8_t leds){
-  int idx = l2cap_connection_find(connection_handle);
+  int idx = l2cap_connection_find_by_psm(connection_handle, PSM_HID_Interrupt_13);
   struct l2cap_connection_t l2cap_connection = l2cap_connection_list[idx];
 
   uint8_t  packet_boundary_flag = 0b10; // Packet_Boundary_Flag
@@ -373,7 +403,7 @@ static void _set_led(uint16_t connection_handle, uint8_t leds){
 }
 
 static void _set_reporting_mode(uint16_t connection_handle, uint8_t reporting_mode, bool continuous){
-  int idx = l2cap_connection_find(connection_handle);
+  int idx = l2cap_connection_find_by_psm(connection_handle, PSM_HID_Interrupt_13);
   struct l2cap_connection_t l2cap_connection = l2cap_connection_list[idx];
 
   uint8_t  packet_boundary_flag = 0b10; // Packet_Boundary_Flag
@@ -406,7 +436,7 @@ static uint8_t _address_space(address_space_t as)
 }
 
 static void _write_memory(uint16_t connection_handle, address_space_t as, uint32_t offset, uint8_t size, const uint8_t* d){
-  int idx = l2cap_connection_find(connection_handle);
+  int idx = l2cap_connection_find_by_psm(connection_handle, PSM_HID_Interrupt_13);
   struct l2cap_connection_t l2cap_connection = l2cap_connection_list[idx];
 
   uint8_t  packet_boundary_flag = 0b10; // Packet_Boundary_Flag
@@ -433,7 +463,7 @@ static void _write_memory(uint16_t connection_handle, address_space_t as, uint32
 }
 
 static void _read_memory(uint16_t connection_handle, address_space_t as, uint32_t offset, uint16_t size){
-  int idx = l2cap_connection_find(connection_handle);
+  int idx = l2cap_connection_find_by_psm(connection_handle, PSM_HID_Interrupt_13);
   struct l2cap_connection_t l2cap_connection = l2cap_connection_list[idx];
 
   uint8_t  packet_boundary_flag = 0b10; // Packet_Boundary_Flag
@@ -471,10 +501,7 @@ static void process_connection_complete_event(uint8_t len, uint8_t* data){
     log_d("  Link_Type          = %02X", lt);
     log_d("  Encryption_Enabled = %02X", ee);
 
-    // No need to connect 0x0011.
-    // BUG: l2cap_connection_list's key must be used "connection_handle+psm"??
-    //_l2cap_connect(connection_handle, 0x0011, 0x0044);
-    _l2cap_connect(connection_handle, 0x0013, 0x0045);
+    _l2cap_connect(connection_handle, PSM_HID_Control_11, _g_local_cid++);
 }
 
 static void process_disconnection_complete_event(uint8_t len, uint8_t* data){
@@ -507,21 +534,16 @@ static void process_l2cap_connection_response(uint16_t connection_handle, uint8_
   log_d("  status          = %04X", status);
 
   if(result == 0x0000){
-      struct l2cap_connection_t l2cap_connection;
-      l2cap_connection.connection_handle = connection_handle;
-      l2cap_connection.remote_cid = destination_cid;
-      int idx = l2cap_connection_add(l2cap_connection);
-      if(idx == -1){
-        log_d("!!! l2cap_connection_add failed.");
-        return;
-      }
+      int idx = l2cap_connection_find_by_local_cid(connection_handle, source_cid);
+      struct l2cap_connection_t *l2cap_connection = &l2cap_connection_list[idx];
+      l2cap_connection->remote_cid = destination_cid;
 
       uint8_t  packet_boundary_flag = 0b10; // Packet_Boundary_Flag
       uint8_t  broadcast_flag       = 0b00; // Broadcast_Flag
       uint16_t channel_id           = 0x0001;
       uint8_t data[] = {
         0x04,       // CONFIGURATION REQUEST
-        0x02,       // Identifier
+        _g_identifier++, // Identifier
         0x08, 0x00, // Length: 0x0008
         destination_cid & 0xFF, destination_cid >> 8, // Destination CID
         0x00, 0x00, // Flags
@@ -577,7 +599,7 @@ static void process_l2cap_configuration_request(uint16_t connection_handle, uint
     uint16_t mtu = (data[11] << 8) | data[10];
     log_d("  MTU=%d", mtu);
 
-    int idx = l2cap_connection_find(connection_handle);
+    int idx = l2cap_connection_find_by_local_cid(connection_handle, destination_cid);
     struct l2cap_connection_t l2cap_connection = l2cap_connection_list[idx];
 
     uint8_t  packet_boundary_flag = 0b10; // Packet_Boundary_Flag
@@ -597,6 +619,10 @@ static void process_l2cap_configuration_request(uint16_t connection_handle, uint
     uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
     _queue_data(_tx_queue, tmp_data, len); // TODO: check return
     log_d("queued acl_l2cap_single_packet(CONFIGURATION RESPONSE)");
+
+    if(l2cap_connection.psm == PSM_HID_Control_11){
+      _l2cap_connect(connection_handle, PSM_HID_Interrupt_13, _g_local_cid++);
+    }
   }
 }
 
