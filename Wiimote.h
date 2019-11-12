@@ -3,13 +3,27 @@
 
 #include <cstdint>
 
-typedef void (* wiimote_callback_t)(uint8_t number, uint8_t *, size_t);
+enum wiimote_event_type_t {
+  WIIMOTE_EVENT_INITIALIZE,
+  WIIMOTE_EVENT_SCAN_START,
+  WIIMOTE_EVENT_SCAN_STOP,
+  WIIMOTE_EVENT_CONNECT,
+  WIIMOTE_EVENT_DISCONNECT,
+  WIIMOTE_EVENT_DATA
+};
+
+typedef void (* wiimote_callback_t)(wiimote_event_type_t event_type, uint16_t handle, uint8_t *data, size_t len);
 
 class Wiimote {
   public:
-    static void init();
-    static void handle();
-    static void register_callback(uint8_t number, wiimote_callback_t cb);
+    void init(wiimote_callback_t cb);
+    void handle();
+    void scan(bool enable);
+    void _callback(wiimote_event_type_t event_type, uint16_t handle, uint8_t *data, size_t len);
+    void set_led(uint16_t handle, uint8_t leds);
+    void set_rumble(uint16_t handle, bool rumble);
+  private:
+    wiimote_callback_t _wiimote_callback;
 };
 
 #endif

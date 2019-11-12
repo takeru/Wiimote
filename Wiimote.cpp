@@ -18,10 +18,10 @@
 #define PSM_HID_Control_11   0x0011
 #define PSM_HID_Interrupt_13 0x0013
 
+static Wiimote *_singleton = NULL;
+
 static uint8_t tmp_data[256];
-static bool hciInit = false;
 static bool wiimoteConnected = false;
-static wiimote_callback_t wiimote_callback[4];
 static uint8_t _g_identifier = 1;
 static uint16_t _g_local_cid = 0x0040;
 
@@ -144,16 +144,10 @@ static void l2cap_connection_clear(void){
   l2cap_connection_size = 0;
 }
 
-static void start_scan(void);
-
 /**
  * callback 
  */
 static void _notify_host_send_available(void){
-  if(!hciInit){
-    start_scan();
-    hciInit = true;
-  }
 }
 
 static int _notify_host_recv(uint8_t *data, uint16_t len){
@@ -169,12 +163,23 @@ static const esp_vhci_host_callback_t callback = {
   _notify_host_recv
 };
 
-static void start_scan(void){
-  scanned_device_clear();
-  l2cap_connection_clear();
+static void _reset(void){
   uint16_t len = make_cmd_reset(tmp_data);
   _queue_data(_tx_queue, tmp_data, len); // TODO: check return 
   log_d("queued reset.");
+}
+
+static void _scan_start(){
+  scanned_device_clear();
+  uint16_t len = make_cmd_inquiry(tmp_data, 0x9E8B33, 0x30, 0x00);
+  _queue_data(_tx_queue, tmp_data, len); // TODO: check return
+  log_d("queued inquiry.");
+}
+
+static void _scan_stop(){
+  uint16_t len = make_cmd_inquiry_cancel(tmp_data);
+  _queue_data(_tx_queue, tmp_data, len); // TODO: check return
+  log_d("queued inquiry_cancel.");
 }
 
 static void process_command_complete_event(uint8_t len, uint8_t* data){
@@ -230,11 +235,7 @@ static void process_command_complete_event(uint8_t len, uint8_t* data){
     // data[0] Num_HCI_Command_Packets
     if(data[3]==0x00){ // OK
       log_d("write_scan_enable OK.");
-
-      scanned_device_clear();
-      uint16_t len = make_cmd_inquiry(tmp_data, 0x9E8B33, 0x05/*0x30*/, 0x00);
-      _queue_data(_tx_queue, tmp_data, len); // TODO: check return
-      log_d("queued inquiry.");
+      _singleton->_callback(WIIMOTE_EVENT_INITIALIZE, 0, NULL, 0);
     }else{
       log_d("write_scan_enable failed.");
     }
@@ -247,7 +248,7 @@ static void process_command_complete_event(uint8_t len, uint8_t* data){
       log_d("inquiry_cancel failed.");
     }
   }else{
-    log_d("!!! process_command_complete_event no impl !!!");
+    log_d("### process_command_complete_event no impl ###");
   }
 }
 
@@ -256,6 +257,7 @@ static void process_command_status_event(uint8_t len, uint8_t* data){
     // data[1] Num_HCI_Command_Packets
     if(data[0]==0x00){ // 0x00=pending
       log_d("inquiry pending!");
+      _singleton->_callback(WIIMOTE_EVENT_SCAN_START, 0, NULL, 0);
     }else{
       log_d("inquiry failed. error=%02X", data[0]);
     }
@@ -276,7 +278,7 @@ static void process_command_status_event(uint8_t len, uint8_t* data){
       log_d("create_connection failed. error=%02X", data[0]);
     }
   }else{
-      log_d("!!! process_command_status_event no impl !!!");
+      log_d("### process_command_status_event no impl ###");
   }
 }
 
@@ -314,7 +316,7 @@ static void process_inquiry_result_event(uint8_t len, uint8_t* data){
           log_d("skiped to remote_name_request. (not Wiimote COD)");
         }
       }else{
-        log_d("failed to scanned_list_add.");
+        log_d("failed to scanned_device_add.");
       }
     }else{
       log_d(" (dup idx=%d)", idx);
@@ -325,7 +327,7 @@ static void process_inquiry_result_event(uint8_t len, uint8_t* data){
 static void process_inquiry_complete_event(uint8_t len, uint8_t* data){
   uint8_t status = data[0];
   log_d("inquiry_complete status=%02X", status);
-  start_scan();
+  _singleton->_callback(WIIMOTE_EVENT_SCAN_STOP, 0, NULL, 0);
 }
 
 static void process_remote_name_request_complete_event(uint8_t len, uint8_t* data){
@@ -340,14 +342,7 @@ static void process_remote_name_request_complete_event(uint8_t len, uint8_t* dat
 
   int idx = scanned_device_find(&bd_addr);
   if(0<=idx && strcmp("Nintendo RVL-CNT-01", name)==0){
-    {
-      uint16_t len = make_cmd_inquiry_cancel(tmp_data);
-      _queue_data(_tx_queue, tmp_data, len); // TODO: check return
-      log_d("queued inquiry_cancel.");
-    }
-
     struct scanned_device_t scanned_device = scanned_device_list[idx];
-
     uint16_t pt = 0x0008;
     uint8_t ars = 0x00;
     uint16_t len = make_cmd_create_connection(tmp_data, scanned_device.bd_addr, pt, scanned_device.psrm, scanned_device.clkofs, ars);
@@ -443,8 +438,7 @@ enum address_space_t {
   CONTROL_REGISTER
 };
 
-static uint8_t _address_space(address_space_t as)
-{
+static uint8_t _address_space(address_space_t as){
   switch(as){
     case EEPROM_MEMORY   : return 0x00;
     case CONTROL_REGISTER: return 0x04;
@@ -531,8 +525,7 @@ static void process_disconnection_complete_event(uint8_t len, uint8_t* data){
   log_d("  Connection_Handle  = 0x%04X", ch);
   log_d("  Reason             = %02X", reason);
 
-  wiimoteConnected = false;
-  start_scan();
+  _singleton->_callback(WIIMOTE_EVENT_DISCONNECT, ch, NULL, 0);
 }
 
 static void process_l2cap_connection_response(uint16_t connection_handle, uint8_t* data){
@@ -640,17 +633,15 @@ static void process_l2cap_configuration_request(uint16_t connection_handle, uint
     if(l2cap_connection.psm == PSM_HID_Control_11){
       _l2cap_connect(connection_handle, PSM_HID_Interrupt_13, _g_local_cid++);
     }
+    if(l2cap_connection.psm == PSM_HID_Interrupt_13){
+      _singleton->_callback(WIIMOTE_EVENT_CONNECT, connection_handle, NULL, 0);
+    }
   }
 }
 
-static void process_report(uint8_t* data, uint16_t len){
+static void process_report(uint16_t connection_handle, uint8_t* data, uint16_t len){
   log_d("REPORT len=%d data=%s", len, formatHex(data, len));
-  // TODO callback[1,2,3]
-  uint8_t number = 0;
-  wiimote_callback_t cb = wiimote_callback[number];
-  if(cb){
-    cb(number, data, len);
-  }
+  _singleton->_callback(WIIMOTE_EVENT_DATA, connection_handle, data, len);
 }
 
 static void process_extension_controller_reports(uint16_t connection_handle, uint16_t channel_id, uint8_t* data, uint16_t len){
@@ -718,42 +709,16 @@ static void process_l2cap_data(uint16_t connection_handle, uint16_t channel_id, 
     process_l2cap_configuration_request(connection_handle, data);
   }else
   if(data[0]==0xA1){ // HID 0xA1
-    if(!wiimoteConnected){
-      _set_led(connection_handle, 0b0001);
-      wiimoteConnected = true;
-    }
     process_extension_controller_reports(connection_handle, channel_id, data, len);
-    process_report(data, len);
-
-    // DEBUG
-    bool wiimote_button_down  = (data[2] & 0x01) != 0;
-    bool wiimote_button_up    = (data[2] & 0x02) != 0;
-    bool wiimote_button_right = (data[2] & 0x04) != 0;
-    bool wiimote_button_left  = (data[2] & 0x08) != 0;
-    bool wiimote_button_plus  = (data[2] & 0x10) != 0;
-    bool wiimote_button_2     = (data[3] & 0x01) != 0;
-    bool wiimote_button_1     = (data[3] & 0x02) != 0;
-    bool wiimote_button_B     = (data[3] & 0x04) != 0;
-    bool wiimote_button_A     = (data[3] & 0x08) != 0;
-    bool wiimote_button_minus = (data[3] & 0x10) != 0;
-    bool wiimote_button_home  = (data[3] & 0x80) != 0;
-    static bool rumble = false;
-    if(wiimote_button_plus && !rumble){
-      _set_rumble(connection_handle, true);
-      rumble = true;
-    }
-    if(wiimote_button_minus && rumble){
-      _set_rumble(connection_handle, false);
-      rumble = false;
-    }
+    process_report(connection_handle, data, len);
   }else{
-    log_d("!!! process_l2cap_data no impl !!!");
+    log_d("  ### process_l2cap_data no impl ###");
     log_d("  L2CAP len=%d data=%s", len, formatHex(data, len));
   }
 }
 
 static void process_acl_data(uint8_t* data, size_t len){
-  if(!wiimoteConnected){
+  if(data[0]!=0xA1){
     log_d("**** ACL_DATA len=%d data=%s", len, formatHex(data, len));
   }
 
@@ -799,12 +764,18 @@ static void process_hci_event(uint8_t event_code, uint8_t len, uint8_t* data){
   }else if(event_code == 0x0D){
     log_d("  (QoS Setup Complete Event)");
   }else{
-    log_d("!!! process_hci_event no impl !!!");
+    log_d("  ### process_hci_event no impl ###");
   }
 }
 
-void Wiimote::init(){
-  for(int i; i<4; i++){ wiimote_callback[i] = NULL; }
+void Wiimote::init(wiimote_callback_t cb){
+  if(_singleton){
+    return;
+  }
+  _singleton = this;
+
+  this->_wiimote_callback = cb;
+  l2cap_connection_clear();
 
   _tx_queue = xQueueCreate(TX_QUEUE_SIZE, sizeof(lendata_t*));
   if (_tx_queue == NULL){
@@ -828,16 +799,18 @@ void Wiimote::init(){
     log_e("esp_vhci_host_register_callback failed: %d %s", ret, esp_err_to_name(ret));
     return;
   }
+
+  _reset();
 }
 
 void Wiimote::handle(){
+  if(this != _singleton){ return; }
   if(!btStarted()){
     return;
   }
 
   if(uxQueueMessagesWaiting(_tx_queue)){
     bool ok = esp_vhci_host_check_send_available();
-    //log_d("esp_vhci_host_check_send_available=%d", ok);
     if(ok){
       lendata_t *lendata = NULL;
       if(xQueueReceive(_tx_queue, &lendata, 0) == pdTRUE){
@@ -867,9 +840,28 @@ void Wiimote::handle(){
   }
 }
 
-void Wiimote::register_callback(uint8_t number, wiimote_callback_t cb){
-  if(number < 1 || 4 < number){
-    return;
+void Wiimote::scan(bool enable){
+  if(this != _singleton){ return; }
+
+  if(enable){
+    _scan_start();
+  }else{
+    _scan_stop();
   }
-  wiimote_callback[number-1] = cb;
+}
+
+void Wiimote::_callback(wiimote_event_type_t event_type, uint16_t handle, uint8_t *data, size_t len){
+  if(this != _singleton){ return; }
+
+  if(this->_wiimote_callback){
+    this->_wiimote_callback(event_type, handle, data, len);
+  }
+}
+
+void Wiimote::set_led(uint16_t handle, uint8_t leds){
+  _set_led(handle, leds);
+}
+
+void Wiimote::set_rumble(uint16_t handle, bool rumble){
+  _set_rumble(handle, rumble);
 }
