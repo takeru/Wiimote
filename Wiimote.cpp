@@ -384,6 +384,24 @@ static void _l2cap_connect(uint16_t connection_handle, uint16_t psm, uint16_t so
     }
 }
 
+static void _set_rumble(uint16_t connection_handle, bool rumble){
+  int idx = l2cap_connection_find_by_psm(connection_handle, PSM_HID_Interrupt_13);
+  struct l2cap_connection_t l2cap_connection = l2cap_connection_list[idx];
+
+  uint8_t  packet_boundary_flag = 0b10; // Packet_Boundary_Flag
+  uint8_t  broadcast_flag       = 0b00; // Broadcast_Flag
+  uint16_t channel_id           = l2cap_connection.remote_cid;
+  uint8_t data[] = {
+    0xA2,
+    0x10,
+    rumble ? 0x01 : 0x00 // 0x0? - 0xF?
+  };
+  uint16_t data_len = 3;
+  uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
+  _queue_data(_tx_queue, tmp_data, len); // TODO: check return
+  log_d("queued acl_l2cap_single_packet(Set Rumble)");
+}
+
 static void _set_led(uint16_t connection_handle, uint8_t leds){
   int idx = l2cap_connection_find_by_psm(connection_handle, PSM_HID_Interrupt_13);
   struct l2cap_connection_t l2cap_connection = l2cap_connection_list[idx];
@@ -707,6 +725,28 @@ static void process_l2cap_data(uint16_t connection_handle, uint16_t channel_id, 
     }
     process_extension_controller_reports(connection_handle, channel_id, data, len);
     process_report(data, len);
+
+    // DEBUG
+    bool wiimote_button_down  = (data[2] & 0x01) != 0;
+    bool wiimote_button_up    = (data[2] & 0x02) != 0;
+    bool wiimote_button_right = (data[2] & 0x04) != 0;
+    bool wiimote_button_left  = (data[2] & 0x08) != 0;
+    bool wiimote_button_plus  = (data[2] & 0x10) != 0;
+    bool wiimote_button_2     = (data[3] & 0x01) != 0;
+    bool wiimote_button_1     = (data[3] & 0x02) != 0;
+    bool wiimote_button_B     = (data[3] & 0x04) != 0;
+    bool wiimote_button_A     = (data[3] & 0x08) != 0;
+    bool wiimote_button_minus = (data[3] & 0x10) != 0;
+    bool wiimote_button_home  = (data[3] & 0x80) != 0;
+    static bool rumble = false;
+    if(wiimote_button_plus && !rumble){
+      _set_rumble(connection_handle, true);
+      rumble = true;
+    }
+    if(wiimote_button_minus && rumble){
+      _set_rumble(connection_handle, false);
+      rumble = false;
+    }
   }else{
     log_d("!!! process_l2cap_data no impl !!!");
     log_d("  L2CAP len=%d data=%s", len, formatHex(data, len));
