@@ -171,7 +171,8 @@ static void _reset(void){
 
 static void _scan_start(){
   scanned_device_clear();
-  uint16_t len = make_cmd_inquiry(tmp_data, 0x9E8B33, 0x30, 0x00);
+  uint8_t timeout = 10; //0x30;
+  uint16_t len = make_cmd_inquiry(tmp_data, 0x9E8B33, timeout, 0x00);
   _queue_data(_tx_queue, tmp_data, len); // TODO: check return
   log_d("queued inquiry.");
 }
@@ -292,6 +293,9 @@ static void process_inquiry_result_event(uint8_t len, uint8_t* data){
     struct bd_addr_t bd_addr;
     STREAM_TO_BDADDR(bd_addr.addr, data+pos);
 
+    // uint8_t ignore[] = {0x54, 0x13, 0x79, 0x31, 0x3E, 0x5A};
+    // if(memcmp(&bd_addr.addr, &ignore, 6)==0){ continue; }
+
     log_d("**** inquiry_result BD_ADDR(%d/%d) = %s", i, num, formatHex((uint8_t*)&bd_addr.addr, BD_ADDR_LEN));
 
     int idx = scanned_device_find(&bd_addr);
@@ -341,7 +345,7 @@ static void process_remote_name_request_complete_event(uint8_t len, uint8_t* dat
   log_d("  REMOTE_NAME = %s", name);
 
   int idx = scanned_device_find(&bd_addr);
-  if(0<=idx && strcmp("Nintendo RVL-CNT-01", name)==0){
+  if(0<=idx && (strcmp("Nintendo RVL-CNT-01", name)==0 || strcmp("Nintendo RVL-WBC-01", name)==0)){
     struct scanned_device_t scanned_device = scanned_device_list[idx];
     uint16_t pt = 0x0008;
     uint8_t ars = 0x00;
@@ -690,6 +694,9 @@ static void process_extension_controller_reports(uint16_t connection_handle, uin
       if(memcmp(data+5, (const uint8_t[]){0x00, 0xFA}, 2)==0){
         if(memcmp(data+7, (const uint8_t[]){0x00, 0x00, 0xA4, 0x20, 0x00, 0x00}, 6)==0){ // Nunchuck
           _set_reporting_mode(connection_handle, 0x32, false); // 0x32: Core Buttons with 8 Extension bytes : 32 BB BB EE EE EE EE EE EE EE EE
+        }
+        if(memcmp(data+7, (const uint8_t[]){0x00, 0x00, 0xA4, 0x20, 0x04, 0x02}, 6)==0){ // Wii Balance Board
+          _set_reporting_mode(connection_handle, 0x34, false); // 0x34: Core Buttons with 19 Extension bytes : 34 BB BB EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE
         }
         controller_query_state = 0;
       }

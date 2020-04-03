@@ -18,26 +18,40 @@ void loop() {
 
 void wiimote_callback(wiimote_event_type_t event_type, uint16_t handle, uint8_t *data, size_t len) {
   static int connection_count = 0;
-  Serial.printf("wiimote handle=%04X len=%d ", handle, len);
+  printf("wiimote handle=%04X len=%d ", handle, len);
   if(event_type == WIIMOTE_EVENT_DATA){
     if(data[1]==0x32){
       for (int i = 0; i < 4; i++) {
-        Serial.printf("%02X ", data[i]);
+        printf("%02X ", data[i]);
       }
-
       // http://wiibrew.org/wiki/Wiimote/Extension_Controllers/Nunchuck
       uint8_t* ext = data+4;
-      Serial.printf(" ... Nunchuk: sx=%3d sy=%3d c=%d z=%d\n",
+      printf(" ... Nunchuk: sx=%3d sy=%3d c=%d z=%d\n",
         ext[0],
         ext[1],
         0==(ext[5]&0x02),
         0==(ext[5]&0x01)
       );
+    }else if(data[1]==0x34){
+      for (int i = 0; i < 4; i++) {
+        printf("%02X ", data[i]);
+      }
+      // https://wiibrew.org/wiki/Wii_Balance_Board#Data_Format
+      uint8_t* ext = data+4;
+      printf(" ... Wii Balance Board: TopRight=%d BottomRight=%d TopLeft=%d BottomLeft=%d Temperature=%d BatteryLevel=0x%02x\n",
+        ext[0] + ext[1] * 256,
+        ext[2] + ext[3] * 256,
+        ext[4] + ext[5] * 256,
+        ext[6] + ext[7] * 256,
+        ext[8],
+        ext[10]
+      );
+      // TODO: Read Calibration Data and calculate to weight. Can we use _read_memory?
     }else{
       for (int i = 0; i < len; i++) {
-        Serial.printf("%02X ", data[i]);
+        printf("%02X ", data[i]);
       }
-      Serial.print("\n");
+      printf("\n");
     }
 
     bool wiimote_button_down  = (data[2] & 0x01) != 0;
@@ -61,30 +75,34 @@ void wiimote_callback(wiimote_event_type_t event_type, uint16_t handle, uint8_t 
       rumble = false;
     }
   }else if(event_type == WIIMOTE_EVENT_INITIALIZE){
-    Serial.print("  event_type=WIIMOTE_EVENT_INITIALIZE\n");
+    printf("  event_type=WIIMOTE_EVENT_INITIALIZE\n");
     wiimote.scan(true);
   }else if(event_type == WIIMOTE_EVENT_SCAN_START){
-    Serial.print("  event_type=WIIMOTE_EVENT_SCAN_START\n");
+    printf("  event_type=WIIMOTE_EVENT_SCAN_START\n");
   }else if(event_type == WIIMOTE_EVENT_SCAN_STOP){
-    Serial.print("  event_type=WIIMOTE_EVENT_SCAN_STOP\n");
+    printf("  event_type=WIIMOTE_EVENT_SCAN_STOP\n");
+    if(connection_count==0){
+      wiimote.scan(true);
+    }
   }else if(event_type == WIIMOTE_EVENT_CONNECT){
-    Serial.print("  event_type=WIIMOTE_EVENT_CONNECT\n");
+    printf("  event_type=WIIMOTE_EVENT_CONNECT\n");
     wiimote.set_led(handle, 1<<connection_count);
     connection_count++;
   }else if(event_type == WIIMOTE_EVENT_DISCONNECT){
-    Serial.print("  event_type=WIIMOTE_EVENT_DISCONNECT\n");
+    printf("  event_type=WIIMOTE_EVENT_DISCONNECT\n");
     connection_count--;
     wiimote.scan(true);
   }else{
-    Serial.printf("  event_type=%d\n", event_type);
+    printf("  event_type=%d\n", event_type);
   }
-  Serial.flush();
   delay(100);
 }
 ```
 
 ## See Also
-- http://wiibrew.org/wiki/Wiimote
+- https://wiibrew.org/wiki/Wiimote
+  - https://wiibrew.org/wiki/Wiimote/Extension_Controllers
+  - https://wiibrew.org/wiki/Wii_Balance_Board
 - http://www.yts.rdy.jp/pic/GB002/GB002.html
 	- http://www.yts.rdy.jp/pic/GB002/hcip.html
 	- http://www.yts.rdy.jp/pic/GB002/hcic.html
