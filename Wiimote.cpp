@@ -25,6 +25,8 @@ static bool wiimoteConnected = false;
 static uint8_t _g_identifier = 1;
 static uint16_t _g_local_cid = 0x0040;
 
+static uint16_t balance_calibration[12];
+
 /**
  * Queue
  */
@@ -696,10 +698,47 @@ static void process_extension_controller_reports(uint16_t connection_handle, uin
           _set_reporting_mode(connection_handle, 0x32, false); // 0x32: Core Buttons with 8 Extension bytes : 32 BB BB EE EE EE EE EE EE EE EE
         }
         if(memcmp(data+7, (const uint8_t[]){0x00, 0x00, 0xA4, 0x20, 0x04, 0x02}, 6)==0){ // Wii Balance Board
-          _set_reporting_mode(connection_handle, 0x34, false); // 0x34: Core Buttons with 19 Extension bytes : 34 BB BB EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE
+          _read_memory(connection_handle, CONTROL_REGISTER, 0xA40024, 16); // read calibration 0 kg and 17kg
+
+          controller_query_state = 4;
         }
-        controller_query_state = 0;
+        else {
+          controller_query_state = 0;
+        } 
       }
+    }
+    break;
+  case 4:
+  {
+      log_d("BALANCE CALIBRATION DATA 1 len=%d data=%s", len, formatHex(data, len));
+      uint8_t* cal = data+7;
+      balance_calibration[0] = cal[0] * 256 + cal[1];//Top Right 0kg 
+      balance_calibration[1] = cal[2] * 256 + cal[3]; //Bottom Right 0kg
+      balance_calibration[2] = cal[4] * 256 + cal[5]; //Top Left 0kg
+      balance_calibration[3] = cal[6] * 256 + cal[7]; //Bottom Left 0kg
+
+      balance_calibration[4] = cal[8] * 256 + cal[9];//Top Right 17kg 
+      balance_calibration[5] = cal[10] * 256 + cal[11];//Bottom Right 17kg
+      balance_calibration[6] = cal[12] * 256 + cal[13];//Top Left 17kg
+      balance_calibration[7] = cal[14] * 256 + cal[15];//Bottom Left 17kg
+      
+      _read_memory(connection_handle, CONTROL_REGISTER, 0xA40034, 8); // read calibration 34kg
+
+      controller_query_state = 5;
+    }
+    break;
+    case 5: 
+    {
+      log_d("BALANCE CALIBRATION DATA 2 len=%d data=%s", len, formatHex(data, len));
+      uint8_t* cal = data+7;
+      balance_calibration[8] = cal[0] * 256 + cal[1];//Top Right 34kg 
+      balance_calibration[9] = cal[2] * 256 + cal[3]; //Bottom Right 34kg
+      balance_calibration[10] = cal[4] * 256 + cal[5]; //Top Left 34kg
+      balance_calibration[11] = cal[6] * 256 + cal[7]; //Bottom Left 34kg
+
+      _set_reporting_mode(connection_handle, 0x34, false); // 0x34: Core Buttons with 19 Extension bytes : 34 BB BB EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE
+
+      controller_query_state = 0;
     }
     break;
   }
@@ -773,6 +812,22 @@ static void process_hci_event(uint8_t event_code, uint8_t len, uint8_t* data){
   }else{
     log_d("  ### process_hci_event no impl ###");
   }
+}
+
+float balance_interpolate(uint8_t pos, uint16_t *values, uint16_t *cal) {
+  float weight = 0;
+
+  if(values[pos] < cal[pos]) {//0kg
+    weight = 0;
+  }
+  else if(values[pos] < cal[pos+4]) {//17kg
+    weight = 17 * (float)(values[pos]-cal[pos])/(float)(cal[pos+4]-cal[pos]);
+  }
+  else /* if (values[pos] > cal[pos+5])*/ {//34kg
+    weight = 17 + 17 * (float)(values[pos]-cal[pos+4])/(float)(cal[pos+8]-cal[pos+4]);
+  }
+
+  return weight;
 }
 
 void Wiimote::init(wiimote_callback_t cb){
@@ -871,4 +926,20 @@ void Wiimote::set_led(uint16_t handle, uint8_t leds){
 
 void Wiimote::set_rumble(uint16_t handle, bool rumble){
   _set_rumble(handle, rumble);
+}
+
+void Wiimote::get_balance_weight(uint8_t *data, float *weight) {
+  uint8_t* ext = data+4;
+
+  uint16_t values[4];
+
+  values[BALANCE_POSITION_TOP_RIGHT]    = ext[0] * 256 + ext[1]; //TopRight
+  values[BALANCE_POSITION_BOTTOM_RIGHT] = ext[2] * 256 + ext[3]; //BottomRight
+  values[BALANCE_POSITION_TOP_LEFT]     = ext[4] * 256 + ext[5]; //TopLeft
+  values[BALANCE_POSITION_BOTTOM_LEFT]  = ext[6] * 256 + ext[7]; //BottomLeft
+
+  weight[BALANCE_POSITION_TOP_RIGHT]    = balance_interpolate(BALANCE_POSITION_TOP_RIGHT, values, balance_calibration);
+  weight[BALANCE_POSITION_BOTTOM_RIGHT] = balance_interpolate(BALANCE_POSITION_BOTTOM_RIGHT, values, balance_calibration);
+  weight[BALANCE_POSITION_TOP_LEFT]     = balance_interpolate(BALANCE_POSITION_TOP_LEFT, values, balance_calibration);
+  weight[BALANCE_POSITION_BOTTOM_LEFT]  = balance_interpolate(BALANCE_POSITION_BOTTOM_LEFT, values, balance_calibration);
 }

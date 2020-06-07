@@ -38,15 +38,24 @@ void wiimote_callback(wiimote_event_type_t event_type, uint16_t handle, uint8_t 
       }
       // https://wiibrew.org/wiki/Wii_Balance_Board#Data_Format
       uint8_t* ext = data+4;
-      printf(" ... Wii Balance Board: TopRight=%d BottomRight=%d TopLeft=%d BottomLeft=%d Temperature=%d BatteryLevel=0x%02x\n",
-        ext[0] + ext[1] * 256,
-        ext[2] + ext[3] * 256,
-        ext[4] + ext[5] * 256,
-        ext[6] + ext[7] * 256,
+      /*printf(" ... Wii Balance Board: TopRight=%d BottomRight=%d TopLeft=%d BottomLeft=%d Temperature=%d BatteryLevel=0x%02x\n",
+        ext[0] * 256 + ext[1],
+        ext[2] * 256 + ext[3],
+        ext[4] * 256 + ext[5],
+        ext[6] * 256 + ext[7],
         ext[8],
         ext[10]
-      );
-      // TODO: Read Calibration Data and calculate to weight. Can we use _read_memory?
+      );*/
+      
+      float weight[4];
+      wiimote.get_balance_weight(data, weight);
+
+      printf(" ... Wii Balance Board: TopRight=%f BottomRight=%f TopLeft=%f BottomLeft=%f\n",
+        weight[BALANCE_POSITION_TOP_RIGHT],
+        weight[BALANCE_POSITION_BOTTOM_RIGHT],
+        weight[BALANCE_POSITION_TOP_LEFT],
+        weight[BALANCE_POSITION_BOTTOM_LEFT]
+      );  
     }else{
       for (int i = 0; i < len; i++) {
         printf("%02X ", data[i]);
