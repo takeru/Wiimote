@@ -12,7 +12,15 @@ enum wiimote_event_type_t {
   WIIMOTE_EVENT_DATA
 };
 
+enum balance_position_type_t {
+  BALANCE_POSITION_TOP_RIGHT,
+  BALANCE_POSITION_BOTTOM_RIGHT,
+  BALANCE_POSITION_TOP_LEFT,
+  BALANCE_POSITION_BOTTOM_LEFT,
+};
+
 typedef void (* wiimote_callback_t)(wiimote_event_type_t event_type, uint16_t handle, uint8_t *data, size_t len);
+
 
 class Wiimote {
   public:
@@ -22,6 +30,7 @@ class Wiimote {
     void _callback(wiimote_event_type_t event_type, uint16_t handle, uint8_t *data, size_t len);
     void set_led(uint16_t handle, uint8_t leds);
     void set_rumble(uint16_t handle, bool rumble);
+    void get_balance_weight(uint8_t *data, float *weight);
   private:
     wiimote_callback_t _wiimote_callback;
 };
