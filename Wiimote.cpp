@@ -23,7 +23,7 @@ static Wiimote *_singleton = NULL;
 static uint8_t tmp_data[256];
 static bool wiimoteConnected = false;
 static uint8_t _g_identifier = 1;
-static uint16_t _g_local_cid = 0x0030;
+static uint16_t _g_local_cid = 0x0040;
 
 static uint16_t balance_calibration[12];
 
