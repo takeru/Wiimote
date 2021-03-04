@@ -707,6 +707,17 @@ static void process_l2cap_disconnection_request(uint16_t connection_handle, uint
     log_d(" l2cap_connection_remove failed.");
   else{
     log_d(" l2cap_connection_remove success, l2cap_connection_size = %d.", rel);
+    //send response
+    uint8_t  packet_boundary_flag = 0b10; // Packet_Boundary_Flag
+    uint8_t  broadcast_flag       = 0b00; // Broadcast_Flag
+    uint16_t channel_id           = 0x0001;
+
+    data[0] = 0x07; //DISCONNECT RESPONSE
+    uint16_t data_len = 8;
+    uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
+    _queue_data(_tx_queue, tmp_data, len); // TODO: check return
+    log_d("queued acl_l2cap_single_packet(DISCONNECTION RESPONSE)");
+  }
 }
 
 static void process_report(uint16_t connection_handle, uint8_t* data, uint16_t len){
