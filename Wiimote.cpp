@@ -570,7 +570,7 @@ static void process_disconnection_complete_event(uint8_t len, uint8_t* data){
   log_d("  Connection_Handle  = 0x%04X", ch);
   log_d("  Reason             = %02X", reason);
   
-  //aqee, clear for reconnect
+  //clear for reconnect
   controller_query_state = -1;
 
   _singleton->_callback(WIIMOTE_EVENT_DISCONNECT, ch, NULL, 0);
@@ -687,7 +687,7 @@ static void process_l2cap_configuration_request(uint16_t connection_handle, uint
   }
 }
 
-static void process_l2cap_connection_close(uint16_t connection_handle, uint8_t* data){
+static void process_l2cap_disconnection_request(uint16_t connection_handle, uint8_t* data){
     // [D][Wiimote.cpp:796] process_acl_data(): **** ACL_DATA len=16 data=81 20 0C 00 08 00 01 00 06 5C 04 00 32 00 7A 00 
     // [D][Wiimote.cpp:789] process_l2cap_data():   ### process_l2cap_data no impl ###
     // [D][Wiimote.cpp:790] process_l2cap_data():   L2CAP len=8 data=06 5C 04 00 32 00 7A 00 
@@ -695,17 +695,17 @@ static void process_l2cap_connection_close(uint16_t connection_handle, uint8_t* 
     // [D][Wiimote.cpp:789] process_l2cap_data():   ### process_l2cap_data no impl ###
     // [D][Wiimote.cpp:790] process_l2cap_data():   L2CAP len=8 data=06 5D 04 00 33 00 7B 00 
 
-  uint16_t source_cid = (data[ 5] << 8) | data[ 4];
-  uint16_t destination_cid = (data[ 7] << 8) | data[ 6];
-  log_d("L2CAP CONNECTION CLOSE");
+  uint16_t destination_cid = (data[ 5] << 8) | data[ 4];
+  uint16_t source_cid = (data[ 7] << 8) | data[ 6];
+  log_d("L2CAP DISCONNECTION REQUEST");
   log_d("  handle          = %02X", connection_handle);
   log_d("  destination_cid = %04X", destination_cid);
   log_d("  souce_cid       = %04X", source_cid);
 
-  int rel = l2cap_connection_remove(connection_handle, source_cid, destination_cid);
+  int rel = l2cap_connection_remove(connection_handle, destination_cid, source_cid);
   if(rel==-1)
     log_d(" l2cap_connection_remove failed.");
-  else
+  else{
     log_d(" l2cap_connection_remove success, l2cap_connection_size = %d.", rel);
 }
 
@@ -911,8 +911,8 @@ static void process_l2cap_data(uint16_t connection_handle, uint16_t channel_id, 
     process_extension_controller_reports(connection_handle, channel_id, data, len);
     process_report(connection_handle, data, len);
   }else
-  if(data[0]==0x06){ // CONNECTION CLOSING ? (Aqee)
-    process_l2cap_connection_close(connection_handle, data);
+  if(data[0]==0x06){ // CONNECTION REQUEST
+    process_l2cap_disconnection_request(connection_handle, data);
   }else{
     log_d("  ### process_l2cap_data no impl ###");
     log_d("  L2CAP len=%d data=%s", len, formatHex(data, len));
