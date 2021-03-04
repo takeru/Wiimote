@@ -997,6 +997,53 @@ float balance_interpolate(uint8_t pos, uint16_t *values, uint16_t *cal) {
   return weight;
 }
 
+//copy from 1.0.4\tools\sdk\include\bt\esp_bt.h
+#define  myBT_CONTROLLER_INIT_CONFIG_DEFAULT() {                              \
+    .controller_task_stack_size = ESP_TASK_BT_CONTROLLER_STACK,            \
+    .controller_task_prio = ESP_TASK_BT_CONTROLLER_PRIO,                   \
+    .hci_uart_no = BT_HCI_UART_NO_DEFAULT,                                 \
+    .hci_uart_baudrate = BT_HCI_UART_BAUDRATE_DEFAULT,                     \
+    .scan_duplicate_mode = SCAN_DUPLICATE_MODE,                            \
+    .scan_duplicate_type = SCAN_DUPLICATE_TYPE_VALUE,                     \
+    .normal_adv_size = NORMAL_SCAN_DUPLICATE_CACHE_SIZE,                   \
+    .mesh_adv_size = MESH_DUPLICATE_SCAN_CACHE_SIZE,                       \
+    .send_adv_reserved_size = SCAN_SEND_ADV_RESERVED_SIZE,                 \
+    .controller_debug_flag = CONTROLLER_ADV_LOST_DEBUG_BIT,                \
+    .mode = BTDM_CONTROLLER_MODE_EFF,                                      \
+    .ble_max_conn = CONFIG_BTDM_CONTROLLER_BLE_MAX_CONN_EFF,               \
+    .bt_max_acl_conn = BTDM_CONTROLLER_BR_EDR_MAX_ACL_CONN_LIMIT, /*=7, CONFIG_BTDM_CONTROLLER_BR_EDR_MAX_ACL_CONN_EFF=2, */    \
+    .bt_sco_datapath = CONFIG_BTDM_CONTROLLER_BR_EDR_SCO_DATA_PATH_EFF,    \
+    .bt_max_sync_conn = CONFIG_BTDM_CONTROLLER_BR_EDR_MAX_SYNC_CONN_EFF,   \
+    .magic = ESP_BT_CONTROLLER_CONFIG_MAGIC_VAL,                           \
+};
+//copy from 1.0.4\cores\esp32\esp32-hal-bt.c
+bool myBtStart(){
+        log_d("BTDM_CONTROLLER_BR_EDR_MAX_ACL_CONN_LIMIT=%d",BTDM_CONTROLLER_BR_EDR_MAX_ACL_CONN_LIMIT);
+        log_d("CONFIG_BTDM_CONTROLLER_BR_EDR_MAX_ACL_CONN_EFF=%d",CONFIG_BTDM_CONTROLLER_BR_EDR_MAX_ACL_CONN_EFF);
+    esp_bt_controller_config_t cfg = myBT_CONTROLLER_INIT_CONFIG_DEFAULT();   //for custom Max connection count
+    if(esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED){
+        log_d("ESP_BT_CONTROLLER_STATUS_ENABLED");
+        return true;
+    }
+    if(esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_IDLE){
+        log_d("ESP_BT_CONTROLLER_STATUS_IDLE");
+        esp_bt_controller_init(&cfg);
+        while(esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_IDLE){}
+    }
+    if(esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_INITED){
+        if (esp_bt_controller_enable(ESP_BT_MODE_BTDM)) {
+            log_e("BT Enable failed");
+            return false;
+        }
+    }
+    if(esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED){
+        return true;
+    }
+    log_e("BT Start failed");
+    return false;
+}
+
+
 void Wiimote::init(wiimote_callback_t cb){
   if(_singleton){
     return;
@@ -1017,7 +1064,7 @@ void Wiimote::init(wiimote_callback_t cb){
     return;
   }
 
-  if(!btStart()){
+  if(!myBtStart()){
     log_e("btStart failed");
     return;
   }
