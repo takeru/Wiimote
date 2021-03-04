@@ -439,6 +439,24 @@ static void _set_led(uint16_t connection_handle, uint8_t leds){
   log_d("queued acl_l2cap_single_packet(Set LEDs)");
 }
 
+static void _send_report(uint16_t connection_handle, uint8_t reportID, uint8_t value){
+  int idx = l2cap_connection_find_by_psm(connection_handle, PSM_HID_Interrupt_13);
+  struct l2cap_connection_t l2cap_connection = l2cap_connection_list[idx];
+
+  uint8_t  packet_boundary_flag = 0b10; // Packet_Boundary_Flag
+  uint8_t  broadcast_flag       = 0b00; // Broadcast_Flag
+  uint16_t channel_id           = l2cap_connection.remote_cid;
+  uint8_t data[] = {
+    0xA2,
+    reportID,
+    value
+  };
+  uint16_t data_len = 3;
+  uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
+  _queue_data(_tx_queue, tmp_data, len); // TODO: check return
+  log_d("queued acl_l2cap_single_packet(Send Report)");
+}
+
 static void _set_reporting_mode(uint16_t connection_handle, uint8_t reporting_mode, bool continuous){
   int idx = l2cap_connection_find_by_psm(connection_handle, PSM_HID_Interrupt_13);
   struct l2cap_connection_t l2cap_connection = l2cap_connection_list[idx];
