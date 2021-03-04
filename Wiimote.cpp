@@ -27,6 +27,8 @@ static uint16_t _g_local_cid = 0x0040;
 
 static uint16_t balance_calibration[12];
 
+static int controller_query_state = -1;
+
 /**
  * Queue
  */
@@ -567,6 +569,9 @@ static void process_disconnection_complete_event(uint8_t len, uint8_t* data){
 
   log_d("  Connection_Handle  = 0x%04X", ch);
   log_d("  Reason             = %02X", reason);
+  
+  //aqee, clear for reconnect
+  controller_query_state = -1;
 
   _singleton->_callback(WIIMOTE_EVENT_DISCONNECT, ch, NULL, 0);
 }
@@ -710,9 +715,10 @@ static void process_report(uint16_t connection_handle, uint8_t* data, uint16_t l
 }
 
 static void process_extension_controller_reports(uint16_t connection_handle, uint16_t channel_id, uint8_t* data, uint16_t len){
-  static int controller_query_state = 0;
-
   switch(controller_query_state){
+  case -1:
+    _send_report(connection_handle, 0x15,0x00); // request state
+    controller_query_state=0;
   case 0:
     // 0x20 Status
     // (a1) 20 BB BB LF 00 00 VV
@@ -721,10 +727,92 @@ static void process_extension_controller_reports(uint16_t connection_handle, uin
         _write_memory(connection_handle, CONTROL_REGISTER, 0xA400F0, 1, (const uint8_t[]){0x55});
         controller_query_state = 1;
       }else{ // extension controller is NOT connected
-        _set_reporting_mode(connection_handle, 0x30, false); // 0x30: Core Buttons : 30 BB BB
+        //_set_reporting_mode(connection_handle, 0x30, false); // 0x30: Core Buttons : 30 BB BB
         //_set_reporting_mode(connection_handle, 0x31, false); // 0x31: Core Buttons and Accelerometer : 31 BB BB AA AA AA
+        controller_query_state =10;
       }
     }
+    else
+      controller_query_state =10;
+    break;
+  case 10:
+    _send_report(connection_handle, 0x13,0x06); //04
+    controller_query_state = 11;
+    break;
+  case 11:
+    if(data[1]==0x22 && data[4]==0x13){
+      if(data[5]==0x00){
+        _send_report(connection_handle, 0x1a,0x06); //04
+        controller_query_state = 12;
+      }else{
+        controller_query_state = 10;
+      }
+    }
+    break;
+  case 12:
+    if(data[1]==0x22 && data[4]==0x1A){
+      if(data[5]==0x00){
+      _write_memory(connection_handle, CONTROL_REGISTER, 0xb00030, 1, (const uint8_t[]){0x08}); //0x08
+      controller_query_state = 13;
+      }else{
+        controller_query_state = 10;
+      }
+    }
+    break;
+  case 13:
+      _write_memory(connection_handle, CONTROL_REGISTER, 0xb00000, 9, (const uint8_t[]){0x02 ,0x00 ,0x00 ,0x71 ,0x01 ,0x00 ,0xaa ,0x00 ,0x64}); //{ 0x00  ,0x00  ,0x00  ,0x00  ,0x00  ,0x00  ,0x90  ,0x00  ,0x41});
+      controller_query_state = 14;
+    if(data[1]==0x22 && data[4]==0x16){
+      if(data[5]==0x00){
+      }else{
+        controller_query_state = 10;
+      }
+    }
+    break;
+  case 14:
+    if(data[1]==0x22 && data[4]==0x16){
+      if(data[5]==0x00){
+      _write_memory(connection_handle, CONTROL_REGISTER, 0xb0001a, 2, (const uint8_t[]){0x63 ,0x03});
+    controller_query_state = 15;
+      }else{
+        controller_query_state = 10;
+      }
+    }
+    break;
+  case 15:
+    if(data[1]==0x22 && data[4]==0x16){
+      if(data[5]==0x00){
+      _write_memory(connection_handle, CONTROL_REGISTER, 0xb00033, 1, (const uint8_t[]){0x03});
+    controller_query_state = 16;
+      }else{
+        controller_query_state = 10;
+      }
+    }
+    break;
+  case 16:
+    if(data[1]==0x22 && data[4]==0x16){
+      if(data[5]==0x00){
+      _write_memory(connection_handle, CONTROL_REGISTER, 0xb00030, 1, (const uint8_t[]){0x08}); //0x08
+      controller_query_state = 17;
+      }else{
+        controller_query_state = 10;
+      }
+    }
+    break;
+  case 17:
+    if(data[1]==0x22 && data[4]==0x16){
+      if(data[5]==0x00){
+        _set_reporting_mode(connection_handle, 0x33, false);  //33
+        controller_query_state = 18;
+        _singleton->_callback(WIIMOTE_EVENT_IRCAMERA_INITIALIZE, connection_handle, NULL, 0);
+      }else{
+        controller_query_state = 10;
+      }
+    }
+    break;
+  case 18:
+    //_send_report(connection_handle, 0x15,0x00); // request state
+    controller_query_state = 19;
     break;
   case 1:
     // A1 22 00 00 16 00 => OK
@@ -734,9 +822,11 @@ static void process_extension_controller_reports(uint16_t connection_handle, uin
         _write_memory(connection_handle, CONTROL_REGISTER, 0xA400FB, 1, (const uint8_t[]){0x00});
         controller_query_state = 2;
       }else{
-        controller_query_state = 0;
+        controller_query_state = 10; //0
       }
     }
+    else
+        controller_query_state = 10; //0
     break;
   case 2:
     if(data[1]==0x22 && data[4]==0x16){
@@ -744,7 +834,7 @@ static void process_extension_controller_reports(uint16_t connection_handle, uin
         _read_memory(connection_handle, CONTROL_REGISTER, 0xA400FA, 6); // read controller type
         controller_query_state = 3;
       }else{
-        controller_query_state = 0;
+        controller_query_state = 10;//0
       }
     }
     break;
@@ -754,6 +844,9 @@ static void process_extension_controller_reports(uint16_t connection_handle, uin
     if(data[1] == 0x21){
       if(memcmp(data+5, (const uint8_t[]){0x00, 0xFA}, 2)==0){
         if(memcmp(data+7, (const uint8_t[]){0x00, 0x00, 0xA4, 0x20, 0x00, 0x00}, 6)==0){ // Nunchuck
+          //aqee
+          controller_query_state=10; 
+          break;
           _set_reporting_mode(connection_handle, 0x32, false); // 0x32: Core Buttons with 8 Extension bytes : 32 BB BB EE EE EE EE EE EE EE EE
         }
         if(memcmp(data+7, (const uint8_t[]){0x00, 0x00, 0xA4, 0x20, 0x04, 0x02}, 6)==0){ // Wii Balance Board
@@ -762,7 +855,8 @@ static void process_extension_controller_reports(uint16_t connection_handle, uin
           controller_query_state = 4;
         }
         else {
-          controller_query_state = 0;
+          //aqee
+          controller_query_state = 10; //0
         } 
       }
     }
