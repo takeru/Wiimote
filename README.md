@@ -8,14 +8,14 @@
 void setup() {
   Serial.begin(115200);
   Wiimote::init();
-  Wiimote::register_callback(1, wiimote_callback);
+  Wiimote::register_callback(1, wiimote_callback, 0);
 }
 
 void loop() {
   Wiimote::handle();
 }
 
-void wiimote_callback(uint8_t number, uint8_t* data, size_t len) {
+void wiimote_callback(uint8_t number, uint8_t* data, size_t len, void *callback_data) {
   Serial.printf("wiimote number=%d len=%d ", number, len);
   if(data[1]==0x32){
     for (int i = 0; i < 4; i++) {

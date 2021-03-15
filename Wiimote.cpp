@@ -605,8 +605,8 @@ static void process_report(uint8_t* data, uint16_t len){
   // TODO callback[1,2,3]
   uint8_t number = 0;
   wiimote_callback_t cb = wiimote_callback[number];
-  if(cb){
-      cb(number, data, len);
+  if(cb.fun){
+      cb.fun(number, data, len, cb.data);
   }
 }
 
@@ -739,7 +739,7 @@ static void process_hci_event(uint8_t event_code, uint8_t len, uint8_t* data){
 }
 
 void Wiimote::init(){
-  for(int i; i<4; i++){ wiimote_callback[i] = NULL; }
+  for(int i=0; i<4; i++){ wiimote_callback[i].fun = NULL; }
 
   _tx_queue = xQueueCreate(TX_QUEUE_SIZE, sizeof(lendata_t*));
   if (_tx_queue == NULL){
@@ -802,9 +802,10 @@ void Wiimote::handle(){
   }
 }
 
-void Wiimote::register_callback(uint8_t number, wiimote_callback_t cb){
+void Wiimote::register_callback(uint8_t number, wiimote_callback_fun_t cb_fun, void *cb_data){
     if(number < 1 || 4 < number){
         return;
     }
-    wiimote_callback[number-1] = cb;
+    wiimote_callback[number-1].data = cb_data;
+    wiimote_callback[number-1].fun = cb_fun;
 }
