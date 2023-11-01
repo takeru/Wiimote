@@ -23,7 +23,7 @@ static Wiimote *_singleton = NULL;
 static uint8_t tmp_data[256];
 static bool wiimoteConnected = false;
 static uint8_t _g_identifier = 1;
-static uint16_t _g_local_cid = 0x0040;
+static uint16_t _g_local_cid = 0x0030;
 
 static uint16_t balance_calibration[12];
 
@@ -134,7 +134,6 @@ static int l2cap_connection_find_by_local_cid(uint16_t connection_handle, uint16
   }
   return -1;
 }
-
 static int l2cap_connection_add(struct l2cap_connection_t l2cap_connection){
   if(L2CAP_CONNECTION_LIST_SIZE == l2cap_connection_size){
     return -1;
@@ -142,6 +141,26 @@ static int l2cap_connection_add(struct l2cap_connection_t l2cap_connection){
   l2cap_connection_list[l2cap_connection_size++] = l2cap_connection;
   return l2cap_connection_size;
 }
+static int l2cap_connection_remove(uint16_t handle, uint16_t local_cid, uint16_t remote_cid){
+  int found=0;
+  log_d("From l2cap connections(size:%d), removing: handle=%d, local_cid:%04x, remote_cid:%04x",l2cap_connection_size, handle, local_cid, remote_cid);
+  for(int i=0; i<l2cap_connection_size; i++){
+    l2cap_connection_t *c = &l2cap_connection_list[i];
+    if(handle==c->connection_handle && local_cid==c->local_cid && remote_cid==c->remote_cid)
+      found++;
+    else
+      l2cap_connection_list[i-found] = l2cap_connection_list[i];
+  }
+  if(found>0){
+    l2cap_connection_size-=found;
+    return l2cap_connection_size;
+  }
+  else{
+    return -1;
+  }
+  
+}
+
 static void l2cap_connection_clear(void){
   l2cap_connection_size = 0;
 }
@@ -645,6 +664,28 @@ static void process_l2cap_configuration_request(uint16_t connection_handle, uint
   }
 }
 
+static void process_l2cap_connection_close(uint16_t connection_handle, uint8_t* data){
+    // [D][Wiimote.cpp:796] process_acl_data(): **** ACL_DATA len=16 data=81 20 0C 00 08 00 01 00 06 5C 04 00 32 00 7A 00 
+    // [D][Wiimote.cpp:789] process_l2cap_data():   ### process_l2cap_data no impl ###
+    // [D][Wiimote.cpp:790] process_l2cap_data():   L2CAP len=8 data=06 5C 04 00 32 00 7A 00 
+    // [D][Wiimote.cpp:796] process_acl_data(): **** ACL_DATA len=16 data=81 20 0C 00 08 00 01 00 06 5D 04 00 33 00 7B 00 
+    // [D][Wiimote.cpp:789] process_l2cap_data():   ### process_l2cap_data no impl ###
+    // [D][Wiimote.cpp:790] process_l2cap_data():   L2CAP len=8 data=06 5D 04 00 33 00 7B 00 
+
+  uint16_t source_cid = (data[ 5] << 8) | data[ 4];
+  uint16_t destination_cid = (data[ 7] << 8) | data[ 6];
+  log_d("L2CAP CONNECTION CLOSE");
+  log_d("  handle          = %02X", connection_handle);
+  log_d("  destination_cid = %04X", destination_cid);
+  log_d("  souce_cid       = %04X", source_cid);
+
+  int rel = l2cap_connection_remove(connection_handle, source_cid, destination_cid);
+  if(rel==-1)
+    log_d(" l2cap_connection_remove failed.");
+  else
+    log_d(" l2cap_connection_remove success, l2cap_connection_size = %d.", rel);
+}
+
 static void process_report(uint16_t connection_handle, uint8_t* data, uint16_t len){
   log_d("REPORT len=%d data=%s", len, formatHex(data, len));
   _singleton->_callback(WIIMOTE_EVENT_DATA, connection_handle, data, len);
@@ -757,6 +798,9 @@ static void process_l2cap_data(uint16_t connection_handle, uint16_t channel_id, 
   if(data[0]==0xA1){ // HID 0xA1
     process_extension_controller_reports(connection_handle, channel_id, data, len);
     process_report(connection_handle, data, len);
+  }else
+  if(data[0]==0x06){ // CONNECTION CLOSING ? (Aqee)
+    process_l2cap_connection_close(connection_handle, data);
   }else{
     log_d("  ### process_l2cap_data no impl ###");
     log_d("  L2CAP len=%d data=%s", len, formatHex(data, len));
