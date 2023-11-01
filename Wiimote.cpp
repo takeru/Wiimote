@@ -27,6 +27,8 @@ static uint16_t _g_local_cid = 0x0040;
 
 static uint16_t balance_calibration[12];
 
+static int controller_query_state = -1;
+
 /**
  * Queue
  */
@@ -134,7 +136,6 @@ static int l2cap_connection_find_by_local_cid(uint16_t connection_handle, uint16
   }
   return -1;
 }
-
 static int l2cap_connection_add(struct l2cap_connection_t l2cap_connection){
   if(L2CAP_CONNECTION_LIST_SIZE == l2cap_connection_size){
     return -1;
@@ -142,6 +143,26 @@ static int l2cap_connection_add(struct l2cap_connection_t l2cap_connection){
   l2cap_connection_list[l2cap_connection_size++] = l2cap_connection;
   return l2cap_connection_size;
 }
+static int l2cap_connection_remove(uint16_t handle, uint16_t local_cid, uint16_t remote_cid){
+  int found=0;
+  log_d("From l2cap connections(size:%d), removing: handle=%d, local_cid:%04x, remote_cid:%04x",l2cap_connection_size, handle, local_cid, remote_cid);
+  for(int i=0; i<l2cap_connection_size; i++){
+    l2cap_connection_t *c = &l2cap_connection_list[i];
+    if(handle==c->connection_handle && local_cid==c->local_cid && remote_cid==c->remote_cid)
+      found++;
+    else
+      l2cap_connection_list[i-found] = l2cap_connection_list[i];
+  }
+  if(found>0){
+    l2cap_connection_size-=found;
+    return l2cap_connection_size;
+  }
+  else{
+    return -1;
+  }
+  
+}
+
 static void l2cap_connection_clear(void){
   l2cap_connection_size = 0;
 }
@@ -420,6 +441,24 @@ static void _set_led(uint16_t connection_handle, uint8_t leds){
   log_d("queued acl_l2cap_single_packet(Set LEDs)");
 }
 
+static void _send_report(uint16_t connection_handle, uint8_t reportID, uint8_t value){
+  int idx = l2cap_connection_find_by_psm(connection_handle, PSM_HID_Interrupt_13);
+  struct l2cap_connection_t l2cap_connection = l2cap_connection_list[idx];
+
+  uint8_t  packet_boundary_flag = 0b10; // Packet_Boundary_Flag
+  uint8_t  broadcast_flag       = 0b00; // Broadcast_Flag
+  uint16_t channel_id           = l2cap_connection.remote_cid;
+  uint8_t data[] = {
+    0xA2,
+    reportID,
+    value
+  };
+  uint16_t data_len = 3;
+  uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
+  _queue_data(_tx_queue, tmp_data, len); // TODO: check return
+  log_d("queued acl_l2cap_single_packet(Send Report)");
+}
+
 static void _set_reporting_mode(uint16_t connection_handle, uint8_t reporting_mode, bool continuous){
   int idx = l2cap_connection_find_by_psm(connection_handle, PSM_HID_Interrupt_13);
   struct l2cap_connection_t l2cap_connection = l2cap_connection_list[idx];
@@ -530,6 +569,9 @@ static void process_disconnection_complete_event(uint8_t len, uint8_t* data){
 
   log_d("  Connection_Handle  = 0x%04X", ch);
   log_d("  Reason             = %02X", reason);
+  
+  //clear for reconnect
+  controller_query_state = -1;
 
   _singleton->_callback(WIIMOTE_EVENT_DISCONNECT, ch, NULL, 0);
 }
@@ -645,15 +687,49 @@ static void process_l2cap_configuration_request(uint16_t connection_handle, uint
   }
 }
 
+static void process_l2cap_disconnection_request(uint16_t connection_handle, uint8_t* data){
+    // [D][Wiimote.cpp:796] process_acl_data(): **** ACL_DATA len=16 data=81 20 0C 00 08 00 01 00 06 5C 04 00 32 00 7A 00 
+    // [D][Wiimote.cpp:789] process_l2cap_data():   ### process_l2cap_data no impl ###
+    // [D][Wiimote.cpp:790] process_l2cap_data():   L2CAP len=8 data=06 5C 04 00 32 00 7A 00 
+    // [D][Wiimote.cpp:796] process_acl_data(): **** ACL_DATA len=16 data=81 20 0C 00 08 00 01 00 06 5D 04 00 33 00 7B 00 
+    // [D][Wiimote.cpp:789] process_l2cap_data():   ### process_l2cap_data no impl ###
+    // [D][Wiimote.cpp:790] process_l2cap_data():   L2CAP len=8 data=06 5D 04 00 33 00 7B 00 
+
+  uint16_t destination_cid = (data[ 5] << 8) | data[ 4];
+  uint16_t source_cid = (data[ 7] << 8) | data[ 6];
+  log_d("L2CAP DISCONNECTION REQUEST");
+  log_d("  handle          = %02X", connection_handle);
+  log_d("  destination_cid = %04X", destination_cid);
+  log_d("  souce_cid       = %04X", source_cid);
+
+  int rel = l2cap_connection_remove(connection_handle, destination_cid, source_cid);
+  if(rel==-1)
+    log_d(" l2cap_connection_remove failed.");
+  else{
+    log_d(" l2cap_connection_remove success, l2cap_connection_size = %d.", rel);
+    //send response
+    uint8_t  packet_boundary_flag = 0b10; // Packet_Boundary_Flag
+    uint8_t  broadcast_flag       = 0b00; // Broadcast_Flag
+    uint16_t channel_id           = 0x0001;
+
+    data[0] = 0x07; //DISCONNECT RESPONSE
+    uint16_t data_len = 8;
+    uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
+    _queue_data(_tx_queue, tmp_data, len); // TODO: check return
+    log_d("queued acl_l2cap_single_packet(DISCONNECTION RESPONSE)");
+  }
+}
+
 static void process_report(uint16_t connection_handle, uint8_t* data, uint16_t len){
   log_d("REPORT len=%d data=%s", len, formatHex(data, len));
   _singleton->_callback(WIIMOTE_EVENT_DATA, connection_handle, data, len);
 }
 
 static void process_extension_controller_reports(uint16_t connection_handle, uint16_t channel_id, uint8_t* data, uint16_t len){
-  static int controller_query_state = 0;
-
   switch(controller_query_state){
+  case -1:
+    _send_report(connection_handle, 0x15,0x00); // request state
+    controller_query_state=0;
   case 0:
     // 0x20 Status
     // (a1) 20 BB BB LF 00 00 VV
@@ -662,10 +738,92 @@ static void process_extension_controller_reports(uint16_t connection_handle, uin
         _write_memory(connection_handle, CONTROL_REGISTER, 0xA400F0, 1, (const uint8_t[]){0x55});
         controller_query_state = 1;
       }else{ // extension controller is NOT connected
-        _set_reporting_mode(connection_handle, 0x30, false); // 0x30: Core Buttons : 30 BB BB
+        //_set_reporting_mode(connection_handle, 0x30, false); // 0x30: Core Buttons : 30 BB BB
         //_set_reporting_mode(connection_handle, 0x31, false); // 0x31: Core Buttons and Accelerometer : 31 BB BB AA AA AA
+        controller_query_state =10;
       }
     }
+    else
+      controller_query_state =10;
+    break;
+  case 10:
+    _send_report(connection_handle, 0x13,0x06); //04
+    controller_query_state = 11;
+    break;
+  case 11:
+    if(data[1]==0x22 && data[4]==0x13){
+      if(data[5]==0x00){
+        _send_report(connection_handle, 0x1a,0x06); //04
+        controller_query_state = 12;
+      }else{
+        controller_query_state = 10;
+      }
+    }
+    break;
+  case 12:
+    if(data[1]==0x22 && data[4]==0x1A){
+      if(data[5]==0x00){
+      _write_memory(connection_handle, CONTROL_REGISTER, 0xb00030, 1, (const uint8_t[]){0x08}); //0x08
+      controller_query_state = 13;
+      }else{
+        controller_query_state = 10;
+      }
+    }
+    break;
+  case 13:
+      _write_memory(connection_handle, CONTROL_REGISTER, 0xb00000, 9, (const uint8_t[]){0x02 ,0x00 ,0x00 ,0x71 ,0x01 ,0x00 ,0xaa ,0x00 ,0x64}); //{ 0x00  ,0x00  ,0x00  ,0x00  ,0x00  ,0x00  ,0x90  ,0x00  ,0x41});
+      controller_query_state = 14;
+    if(data[1]==0x22 && data[4]==0x16){
+      if(data[5]==0x00){
+      }else{
+        controller_query_state = 10;
+      }
+    }
+    break;
+  case 14:
+    if(data[1]==0x22 && data[4]==0x16){
+      if(data[5]==0x00){
+      _write_memory(connection_handle, CONTROL_REGISTER, 0xb0001a, 2, (const uint8_t[]){0x63 ,0x03});
+    controller_query_state = 15;
+      }else{
+        controller_query_state = 10;
+      }
+    }
+    break;
+  case 15:
+    if(data[1]==0x22 && data[4]==0x16){
+      if(data[5]==0x00){
+      _write_memory(connection_handle, CONTROL_REGISTER, 0xb00033, 1, (const uint8_t[]){0x03});
+    controller_query_state = 16;
+      }else{
+        controller_query_state = 10;
+      }
+    }
+    break;
+  case 16:
+    if(data[1]==0x22 && data[4]==0x16){
+      if(data[5]==0x00){
+      _write_memory(connection_handle, CONTROL_REGISTER, 0xb00030, 1, (const uint8_t[]){0x08}); //0x08
+      controller_query_state = 17;
+      }else{
+        controller_query_state = 10;
+      }
+    }
+    break;
+  case 17:
+    if(data[1]==0x22 && data[4]==0x16){
+      if(data[5]==0x00){
+        _set_reporting_mode(connection_handle, 0x33, false);  //33
+        controller_query_state = 18;
+        _singleton->_callback(WIIMOTE_EVENT_IRCAMERA_INITIALIZE, connection_handle, NULL, 0);
+      }else{
+        controller_query_state = 10;
+      }
+    }
+    break;
+  case 18:
+    //_send_report(connection_handle, 0x15,0x00); // request state
+    controller_query_state = 19;
     break;
   case 1:
     // A1 22 00 00 16 00 => OK
@@ -675,9 +833,11 @@ static void process_extension_controller_reports(uint16_t connection_handle, uin
         _write_memory(connection_handle, CONTROL_REGISTER, 0xA400FB, 1, (const uint8_t[]){0x00});
         controller_query_state = 2;
       }else{
-        controller_query_state = 0;
+        controller_query_state = 10; //0
       }
     }
+    else
+        controller_query_state = 10; //0
     break;
   case 2:
     if(data[1]==0x22 && data[4]==0x16){
@@ -685,7 +845,7 @@ static void process_extension_controller_reports(uint16_t connection_handle, uin
         _read_memory(connection_handle, CONTROL_REGISTER, 0xA400FA, 6); // read controller type
         controller_query_state = 3;
       }else{
-        controller_query_state = 0;
+        controller_query_state = 10;//0
       }
     }
     break;
@@ -695,6 +855,9 @@ static void process_extension_controller_reports(uint16_t connection_handle, uin
     if(data[1] == 0x21){
       if(memcmp(data+5, (const uint8_t[]){0x00, 0xFA}, 2)==0){
         if(memcmp(data+7, (const uint8_t[]){0x00, 0x00, 0xA4, 0x20, 0x00, 0x00}, 6)==0){ // Nunchuck
+          //aqee
+          controller_query_state=10; 
+          break;
           _set_reporting_mode(connection_handle, 0x32, false); // 0x32: Core Buttons with 8 Extension bytes : 32 BB BB EE EE EE EE EE EE EE EE
         }
         if(memcmp(data+7, (const uint8_t[]){0x00, 0x00, 0xA4, 0x20, 0x04, 0x02}, 6)==0){ // Wii Balance Board
@@ -703,7 +866,8 @@ static void process_extension_controller_reports(uint16_t connection_handle, uin
           controller_query_state = 4;
         }
         else {
-          controller_query_state = 0;
+          //aqee
+          controller_query_state = 10; //0
         } 
       }
     }
@@ -757,6 +921,9 @@ static void process_l2cap_data(uint16_t connection_handle, uint16_t channel_id, 
   if(data[0]==0xA1){ // HID 0xA1
     process_extension_controller_reports(connection_handle, channel_id, data, len);
     process_report(connection_handle, data, len);
+  }else
+  if(data[0]==0x06){ // CONNECTION REQUEST
+    process_l2cap_disconnection_request(connection_handle, data);
   }else{
     log_d("  ### process_l2cap_data no impl ###");
     log_d("  L2CAP len=%d data=%s", len, formatHex(data, len));
@@ -830,6 +997,53 @@ float balance_interpolate(uint8_t pos, uint16_t *values, uint16_t *cal) {
   return weight;
 }
 
+//copy from 1.0.4\tools\sdk\include\bt\esp_bt.h
+#define  myBT_CONTROLLER_INIT_CONFIG_DEFAULT() {                              \
+    .controller_task_stack_size = ESP_TASK_BT_CONTROLLER_STACK,            \
+    .controller_task_prio = ESP_TASK_BT_CONTROLLER_PRIO,                   \
+    .hci_uart_no = BT_HCI_UART_NO_DEFAULT,                                 \
+    .hci_uart_baudrate = BT_HCI_UART_BAUDRATE_DEFAULT,                     \
+    .scan_duplicate_mode = SCAN_DUPLICATE_MODE,                            \
+    .scan_duplicate_type = SCAN_DUPLICATE_TYPE_VALUE,                     \
+    .normal_adv_size = NORMAL_SCAN_DUPLICATE_CACHE_SIZE,                   \
+    .mesh_adv_size = MESH_DUPLICATE_SCAN_CACHE_SIZE,                       \
+    .send_adv_reserved_size = SCAN_SEND_ADV_RESERVED_SIZE,                 \
+    .controller_debug_flag = CONTROLLER_ADV_LOST_DEBUG_BIT,                \
+    .mode = BTDM_CONTROLLER_MODE_EFF,                                      \
+    .ble_max_conn = CONFIG_BTDM_CONTROLLER_BLE_MAX_CONN_EFF,               \
+    .bt_max_acl_conn = BTDM_CONTROLLER_BR_EDR_MAX_ACL_CONN_LIMIT, /*=7, CONFIG_BTDM_CONTROLLER_BR_EDR_MAX_ACL_CONN_EFF=2, */    \
+    .bt_sco_datapath = CONFIG_BTDM_CONTROLLER_BR_EDR_SCO_DATA_PATH_EFF,    \
+    .bt_max_sync_conn = CONFIG_BTDM_CONTROLLER_BR_EDR_MAX_SYNC_CONN_EFF,   \
+    .magic = ESP_BT_CONTROLLER_CONFIG_MAGIC_VAL,                           \
+};
+//copy from 1.0.4\cores\esp32\esp32-hal-bt.c
+bool myBtStart(){
+        log_d("BTDM_CONTROLLER_BR_EDR_MAX_ACL_CONN_LIMIT=%d",BTDM_CONTROLLER_BR_EDR_MAX_ACL_CONN_LIMIT);
+        log_d("CONFIG_BTDM_CONTROLLER_BR_EDR_MAX_ACL_CONN_EFF=%d",CONFIG_BTDM_CONTROLLER_BR_EDR_MAX_ACL_CONN_EFF);
+    esp_bt_controller_config_t cfg = myBT_CONTROLLER_INIT_CONFIG_DEFAULT();   //for custom Max connection count
+    if(esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED){
+        log_d("ESP_BT_CONTROLLER_STATUS_ENABLED");
+        return true;
+    }
+    if(esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_IDLE){
+        log_d("ESP_BT_CONTROLLER_STATUS_IDLE");
+        esp_bt_controller_init(&cfg);
+        while(esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_IDLE){}
+    }
+    if(esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_INITED){
+        if (esp_bt_controller_enable(ESP_BT_MODE_BTDM)) {
+            log_e("BT Enable failed");
+            return false;
+        }
+    }
+    if(esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED){
+        return true;
+    }
+    log_e("BT Start failed");
+    return false;
+}
+
+
 void Wiimote::init(wiimote_callback_t cb){
   if(_singleton){
     return;
@@ -850,7 +1064,7 @@ void Wiimote::init(wiimote_callback_t cb){
     return;
   }
 
-  if(!btStart()){
+  if(!myBtStart()){
     log_e("btStart failed");
     return;
   }
