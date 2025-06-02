@@ -458,6 +458,12 @@ static void _set_reporting_mode(uint16_t connection_handle, uint8_t reporting_mo
   log_d("queued acl_l2cap_single_packet(Set reporting mode)");
 }
 
+static void _initiate_auth(uint16_t handle) {
+  uint16_t data_len = make_cmd_auth_request(tmp_data, handle);
+  _queue_data(_tx_queue, tmp_data, data_len);
+  log_d("queued auth request(initiate auth)");
+}
+
 enum address_space_t {
   EEPROM_MEMORY,
   CONTROL_REGISTER
@@ -551,6 +557,33 @@ static void process_disconnection_complete_event(uint8_t len, uint8_t* data){
   log_d("  Reason             = %02X", reason);
 
   _singleton->_callback(WIIMOTE_EVENT_DISCONNECT, ch, NULL, 0);
+}
+
+static void process_link_key_request_event(uint8_t len, uint8_t* data) {
+  struct bd_addr_t bd_addr;
+  STREAM_TO_BDADDR(bd_addr.addr, data);
+  uint16_t data_len = make_cmd_negative_reply(tmp_data, bd_addr);
+  _queue_data(_tx_queue, tmp_data, data_len);
+  log_d("queued negative link key reply(process_link_key_request)");
+}
+
+static void process_pin_request_event(uint8_t len, uint8_t *data) {
+  struct bd_addr_t bd_addr;
+  STREAM_TO_BDADDR(bd_addr.addr, data);
+  uint8_t pin_data[6];
+
+  // The pin is the mac of the host controller reversed
+  esp_read_mac(pin_data, ESP_MAC_BT);
+  for (size_t i = 0; i < 3; ++i)
+  {
+    uint8_t tmp = pin_data[5 - i];
+    pin_data[5 - i] = pin_data[i];
+    pin_data[i] = tmp;
+  }
+  log_d("Pin data=%s", formatHex(pin_data, 6));
+  uint16_t data_len = make_cmd_pin_reply(tmp_data, bd_addr, pin_data);
+  _queue_data(_tx_queue, tmp_data, data_len);
+  log_d("queued pin reply(process_pin_request)");
 }
 
 static void process_l2cap_connection_response(uint16_t connection_handle, uint8_t* data){
@@ -849,6 +882,10 @@ static void process_hci_event(uint8_t event_code, uint8_t len, uint8_t* data){
     process_connection_complete_event(len, data);
   }else if(event_code == 0x05){
     process_disconnection_complete_event(len, data);
+  }else if (event_code == 0x17){
+    process_link_key_request_event(len, data);
+  }else if (event_code == 0x16){
+    process_pin_request_event(len, data);
   }else if(event_code == 0x13){
     log_d("  (Number Of Completed Packets Event)");
   }else if(event_code == 0x0D){
@@ -986,4 +1023,8 @@ void Wiimote::get_balance_weight(uint8_t *data, float *weight) {
   weight[BALANCE_POSITION_BOTTOM_RIGHT] = balance_interpolate(BALANCE_POSITION_BOTTOM_RIGHT, values, balance_calibration);
   weight[BALANCE_POSITION_TOP_LEFT]     = balance_interpolate(BALANCE_POSITION_TOP_LEFT, values, balance_calibration);
   weight[BALANCE_POSITION_BOTTOM_LEFT]  = balance_interpolate(BALANCE_POSITION_BOTTOM_LEFT, values, balance_calibration);
+}
+
+void Wiimote::initiate_auth(uint16_t handle) {
+  _initiate_auth(handle);
 }

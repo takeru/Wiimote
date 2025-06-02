@@ -31,6 +31,7 @@ class Wiimote {
     void set_led(uint16_t handle, uint8_t leds);
     void set_rumble(uint16_t handle, bool rumble);
     void get_balance_weight(uint8_t *data, float *weight);
+    void initiate_auth(uint16_t handle);
   private:
     wiimote_callback_t _wiimote_callback;
 };
