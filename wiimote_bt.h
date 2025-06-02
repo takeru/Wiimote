@@ -16,6 +16,9 @@
 #define HCI_INQUIRY_CANCEL                 (0x0002 | HCI_GRP_LINK_CONT_CMDS)
 #define HCI_REMOTE_NAME_REQUEST            (0x0019 | HCI_GRP_LINK_CONT_CMDS)
 #define HCI_CREATE_CONNECTION              (0x0005 | HCI_GRP_LINK_CONT_CMDS)
+#define HCI_AUTHENTICATION                 (0x0011 | HCI_GRP_LINK_CONT_CMDS)
+#define HCI_NEGATIVE_REPLY                 (0x000C | HCI_GRP_LINK_CONT_CMDS)
+#define HCI_PIN_REPLY                      (0x000D | HCI_GRP_LINK_CONT_CMDS)
 
 #define BD_ADDR_LEN     (6)
 struct bd_addr_t {
@@ -125,6 +128,47 @@ static uint16_t make_cmd_create_connection(uint8_t *buf, struct bd_addr_t bd_add
   UINT16_TO_STREAM (buf, clkofs); // Clock_Offset
   UINT8_TO_STREAM (buf, ars);     // Allow_Role_Switch
   return HCI_H4_CMD_PREAMBLE_SIZE + 13;
+}
+
+static uint16_t make_cmd_auth_request(uint8_t *buf, uint16_t connection_handle){
+  UINT8_TO_STREAM(buf, H4_TYPE_COMMAND);
+  UINT16_TO_STREAM(buf, HCI_AUTHENTICATION);
+  UINT8_TO_STREAM(buf, 2);
+
+  UINT8_TO_STREAM(buf, connection_handle & 0xFF);
+  UINT8_TO_STREAM(buf, (connection_handle >> 8) & 0x0F);
+  return HCI_H4_CMD_PREAMBLE_SIZE + 2;
+}
+
+static uint16_t make_cmd_negative_reply(uint8_t *buf, struct bd_addr_t bd_addr){
+  UINT8_TO_STREAM(buf, H4_TYPE_COMMAND);
+  UINT16_TO_STREAM(buf, HCI_NEGATIVE_REPLY);
+  UINT8_TO_STREAM(buf, 6);
+
+  BDADDR_TO_STREAM(buf, bd_addr.addr);
+
+  return HCI_H4_CMD_PREAMBLE_SIZE + 6;
+}
+
+static uint16_t make_cmd_pin_reply(uint8_t *buf, struct bd_addr_t bd_addr, uint8_t pin[6]){
+  UINT8_TO_STREAM(buf, H4_TYPE_COMMAND);
+  UINT16_TO_STREAM(buf, HCI_PIN_REPLY);
+  UINT8_TO_STREAM(buf, 6 + 1 + 16); // 23
+
+  BDADDR_TO_STREAM(buf, bd_addr.addr);
+  UINT8_TO_STREAM(buf, 6); // Pin length
+
+  for (uint8_t i = 0; i < 6; i++)
+  {
+    UINT8_TO_STREAM(buf, pin[i]);
+  }
+
+  for (uint8_t i = 0; i < 10; i++)
+  {
+    UINT8_TO_STREAM(buf, 0);
+  }
+
+  return HCI_H4_CMD_PREAMBLE_SIZE + 23;
 }
 
 // TODO long data is split to multi packets
