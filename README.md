@@ -1,5 +1,10 @@
 # Wiimote Bluetooth Connection Library for Arduino core for ESP32
 
+## Notes
+
+1. Pairing is only stored on the wiimote when using the red-sync button, pairing by pressing 1 & 2 is not saved.
+2. Reconnecting a paired device is easier when scanning is off.
+
 ## Example
 
 ```WiimoteDemo.ino.cpp
@@ -93,6 +98,9 @@ void wiimote_callback(wiimote_event_type_t event_type, uint16_t handle, uint8_t 
     if(connection_count==0){
       wiimote.scan(true);
     }
+  }else if (event_type == WIIMOTE_EVENT_NEW){
+    printf("  event_type=WIIMOTE_EVENT_NEW\n");
+    wiimote.initiate_auth(handle);
   }else if(event_type == WIIMOTE_EVENT_CONNECT){
     printf("  event_type=WIIMOTE_EVENT_CONNECT\n");
     wiimote.set_led(handle, 1<<connection_count);
