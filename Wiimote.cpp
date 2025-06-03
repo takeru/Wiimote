@@ -160,6 +160,7 @@ struct l2cap_connection_t {
   uint16_t psm;
   uint16_t local_cid;
   uint16_t remote_cid;
+  bool initiator;
 };
 static int l2cap_connection_size = 0;
 #define L2CAP_CONNECTION_LIST_SIZE 8
@@ -449,6 +450,7 @@ static void _l2cap_connect(uint16_t connection_handle, uint16_t psm, uint16_t so
   l2cap_connection.psm               = psm;
   l2cap_connection.local_cid         = source_cid;
   l2cap_connection.remote_cid        = 0;
+  l2cap_connection.initiator         = true;
   int idx = l2cap_connection_add(l2cap_connection);
   if(idx == -1){
     log_d("!!! l2cap_connection_add failed.");
@@ -760,7 +762,9 @@ static void process_l2cap_configuration_request(uint16_t connection_handle, uint
     log_d("queued acl_l2cap_single_packet(CONFIGURATION RESPONSE)");
 
     if(l2cap_connection.psm == PSM_HID_Control_11){
-      _l2cap_connect(connection_handle, PSM_HID_Interrupt_13, _g_local_cid++);
+      if (l2cap_connection.initiator) {
+        _l2cap_connect(connection_handle, PSM_HID_Interrupt_13, _g_local_cid++);
+      }
     }
     if(l2cap_connection.psm == PSM_HID_Interrupt_13){
       _singleton->_callback(WIIMOTE_EVENT_CONNECT, connection_handle, NULL, 0);
