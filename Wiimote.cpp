@@ -437,8 +437,8 @@ static void _l2cap_connect(uint16_t connection_handle, uint16_t psm, uint16_t so
     0x02,                               // CONNECTION REQUEST
     _g_identifier++,                    // Identifier
     0x04, 0x00,                         // Length:     0x0004
-    psm        & 0xFF, psm        >> 8, // PSM: HID_Control=0x0011, HID_Interrupt=0x0013
-    source_cid & 0xFF, source_cid >> 8  // Source CID: 0x0040+
+    (uint8_t)(psm & 0xFF), (uint8_t)(psm >> 8), // PSM: HID_Control=0x0011, HID_Interrupt=0x0013
+    (uint8_t)(source_cid & 0xFF), (uint8_t)(source_cid >> 8)  // Source CID: 0x0040+
   };
   uint16_t data_len = 8;
   uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
@@ -467,7 +467,7 @@ static void _set_rumble(uint16_t connection_handle, bool rumble){
   uint8_t data[] = {
     0xA2,
     0x10,
-    rumble ? 0x01 : 0x00 // 0x0? - 0xF?
+    (uint8_t)(rumble ? 0x01 : 0x00) // 0x0? - 0xF?
   };
   uint16_t data_len = 3;
   uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
@@ -485,7 +485,7 @@ static void _set_led(uint16_t connection_handle, uint8_t leds){
   uint8_t data[] = {
     0xA2,
     0x11,
-    leds << 4 // 0x0? - 0xF?
+    (uint8_t)(leds << 4) // 0x0? - 0xF?
   };
   uint16_t data_len = 3;
   uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
@@ -503,7 +503,7 @@ static void _set_reporting_mode(uint16_t connection_handle, uint8_t reporting_mo
   uint8_t data[] = {
     0xA2,
     0x12,
-    continuous ? 0x04 : 0x00, // 0x00, 0x04
+    (uint8_t)(continuous ? 0x04 : 0x00), // 0x00, 0x04
     reporting_mode
   };
   uint16_t data_len = 4;
@@ -543,9 +543,9 @@ static void _write_memory(uint16_t connection_handle, address_space_t as, uint32
     0xA2,
     0x16, // Write
     _address_space(as),    // MM 0x00=EEPROM, 0x04=ControlRegister
-    (offset >> 16) & 0xFF, // FF
-    (offset >>  8) & 0xFF, // FF
-    (offset      ) & 0xFF, // FF
+    (uint8_t)((offset >> 16) & 0xFF), // FF
+    (uint8_t)((offset >>  8) & 0xFF), // FF
+    (uint8_t)((offset      ) & 0xFF), // FF
     size,                  // SS size 1..16
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
@@ -570,11 +570,11 @@ static void _read_memory(uint16_t connection_handle, address_space_t as, uint32_
     0xA2,
     0x17, // Read
     _address_space(as),    // MM 0x00=EEPROM, 0x04=ControlRegister
-    (offset >> 16) & 0xFF, // FF
-    (offset >>  8) & 0xFF, // FF
-    (offset      ) & 0xFF, // FF
-    (size >> 8   ) & 0xFF, // SS
-    (size        ) & 0xFF  // SS
+    (uint8_t)((offset >> 16) & 0xFF), // FF
+    (uint8_t)((offset >>  8) & 0xFF), // FF
+    (uint8_t)((offset      ) & 0xFF), // FF
+    (uint8_t)((size >> 8   ) & 0xFF), // SS
+    (uint8_t)((size        ) & 0xFF)  // SS
   };
   uint16_t data_len = 8;
   uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
@@ -686,7 +686,7 @@ static void process_l2cap_connection_response(uint16_t connection_handle, uint8_
       0x04,       // CONFIGURATION REQUEST
       _g_identifier++, // Identifier
       0x08, 0x00, // Length: 0x0008
-      destination_cid & 0xFF, destination_cid >> 8, // Destination CID
+      (uint8_t)(destination_cid & 0xFF), (uint8_t)(destination_cid >> 8), // Destination CID
       0x00, 0x00, // Flags
       0x01, 0x02, 0x40, 0x00 // type=01 len=02 value=00 40
     };
@@ -751,10 +751,10 @@ static void process_l2cap_configuration_request(uint16_t connection_handle, uint
       0x05,       // CONFIGURATION RESPONSE
       identifier, // Identifier
       0x0A, 0x00, // Length: 0x000A
-      source_cid & 0xFF, source_cid >> 8, // Source CID
+      (uint8_t)(source_cid & 0xFF), (uint8_t)(source_cid >> 8), // Source CID
       0x00, 0x00, // Flags
       0x00, 0x00, // Res
-      0x01, 0x02, mtu & 0xFF, mtu >> 8 // type=01 len=02 value=xx xx
+      0x01, 0x02, (uint8_t)(mtu & 0xFF), (uint8_t)(mtu >> 8) // type=01 len=02 value=xx xx
     };
     uint16_t data_len = 14;
     uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
