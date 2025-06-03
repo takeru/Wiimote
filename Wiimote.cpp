@@ -822,6 +822,7 @@ static void process_l2cap_configuration_request(uint16_t connection_handle, uint
 
     if (l2cap_connection.initiator) {
       if(l2cap_connection.psm == PSM_HID_Control_11){
+        _singleton->_callback(WIIMOTE_EVENT_NEW, connection_handle, NULL, 0);
         _l2cap_connect(connection_handle, PSM_HID_Interrupt_13, _g_local_cid++);
       } else
       if(l2cap_connection.psm == PSM_HID_Interrupt_13){
