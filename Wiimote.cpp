@@ -659,6 +659,50 @@ static void process_pin_request_event(uint8_t len, uint8_t *data) {
   log_d("queued pin reply(process_pin_request)");
 }
 
+static void process_l2cap_connection_request(uint16_t connection_handle, uint8_t *data)
+{
+  uint16_t source_cid = (data[7] << 8) | data[6];
+  uint16_t psm = (data[5] << 8) | data[4];
+  struct l2cap_connection_t l2cap_connection;
+  l2cap_connection.connection_handle = connection_handle;
+  l2cap_connection.psm = psm;
+  l2cap_connection.remote_cid = source_cid;
+  l2cap_connection.local_cid = _g_local_cid++;
+  l2cap_connection.initiator = false;
+
+  log_d("L2CAP CONNECTION REQUEST");
+  log_d("  identifier      = %02X", data[1]);
+  log_d("  local_cid = %04X", l2cap_connection.local_cid);
+  log_d("  remote_cid      = %04X", source_cid);
+  log_d("  psm          = %04X", psm);
+
+  int idx = l2cap_connection_add(l2cap_connection);
+  if (idx == -1)
+  {
+    log_d("!!! failed to add l2cap_connection.");
+  }
+
+  uint16_t result = idx != -1? 0x00 : 0x04; // Connection refused if idx == -1.
+  uint8_t response_data[] = {
+      0x03,
+      data[1], // Request identifier
+      0x08, 0x00,
+      (uint8_t)(l2cap_connection.local_cid & 0xFF), (uint8_t)(l2cap_connection.local_cid >> 8),
+      (uint8_t)(l2cap_connection.remote_cid & 0xFF), (uint8_t)(l2cap_connection.remote_cid >> 8),
+      (uint8_t)(result & 0xFF), (uint8_t)(result >> 8),
+      0x00, 0x00, // No status
+  };
+
+  uint8_t packet_boundary_flag = 0b10;
+  uint8_t broadcast_flag = 0b00;
+  uint16_t channel_id = 1;
+
+  uint16_t data_len = 12;
+  uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, response_data, data_len);
+  _queue_data(_tx_queue, tmp_data, len);
+  log_d("queued acl_l2cap_single_packet(CONNECTION RESPONSE)");
+}
+
 static void process_l2cap_connection_response(uint16_t connection_handle, uint8_t* data){
   uint8_t identifier       =  data[ 1];
   uint16_t len             = (data[ 3] << 8) | data[ 2];
@@ -894,6 +938,9 @@ static void process_extension_controller_reports(uint16_t connection_handle, uin
 }
 
 static void process_l2cap_data(uint16_t connection_handle, uint16_t channel_id, uint8_t* data, uint16_t len){
+  if(data[0]==0x02){ // CONNECTION REQUEST
+    process_l2cap_connection_request(connection_handle, data);
+  }else
   if(data[0]==0x03){ // CONNECTION RESPONSE
     process_l2cap_connection_response(connection_handle, data);
   }else
