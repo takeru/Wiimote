@@ -74,6 +74,54 @@ static char* formatHex(uint8_t* data, uint16_t len){
 }
 
 /**
+ * Requested connections list
+ */
+struct requested_connection_t {
+  bd_addr_t bd_addr;
+};
+static int requested_connection_list_size = 0;
+#define REQUESTED_CONNECTION_LIST_SIZE 16
+static requested_connection_t requested_connection_list[REQUESTED_CONNECTION_LIST_SIZE];
+
+static int requested_connection_add(struct requested_connection_t requested_connection){
+  if(REQUESTED_CONNECTION_LIST_SIZE == requested_connection_list_size){
+    return -1;
+  }
+  requested_connection_list[requested_connection_list_size++] = requested_connection;
+  return requested_connection_list_size;
+}
+static int requested_connection_find(struct bd_addr_t *bd_addr){
+  for(int i=0; i<requested_connection_list_size; i++){
+    requested_connection_t *c = &requested_connection_list[i];
+    if(memcmp(&bd_addr->addr, c->bd_addr.addr, BD_ADDR_LEN) == 0){
+      return i;
+    }
+  }
+  return -1;
+}
+static int requested_connection_remove(struct bd_addr_t *bd_addr){
+  int found=0;
+  for(int i=0; i<requested_connection_list_size; i++){
+    requested_connection_t *c = &requested_connection_list[i];
+    if(memcmp(&bd_addr->addr, c->bd_addr.addr, BD_ADDR_LEN) == 0){
+      found++;
+    }else{
+      requested_connection_list[i-found] = requested_connection_list[i];
+    }
+  }
+  if(found>0){
+    requested_connection_list_size-=found;
+    return requested_connection_list_size;
+  }
+  else{
+    return -1;
+  }
+}
+static void requested_connection_clear(void){
+  requested_connection_list_size = 0;
+}
+
+ /**
  * Scanned device list
  */
 struct scanned_device_t {
@@ -368,6 +416,10 @@ static void process_remote_name_request_complete_event(uint8_t len, uint8_t* dat
   int idx = scanned_device_find(&bd_addr);
   if(0<=idx && (strcmp("Nintendo RVL-CNT-01", name)==0 || strcmp("Nintendo RVL-WBC-01", name)==0)){
     struct scanned_device_t scanned_device = scanned_device_list[idx];
+    struct requested_connection_t requested_connection;
+    requested_connection.bd_addr = bd_addr;
+    requested_connection_add(requested_connection);
+
     uint16_t pt = 0x0008;
     uint8_t ars = 0x00;
     uint16_t len = make_cmd_create_connection(tmp_data, scanned_device.bd_addr, pt, scanned_device.psrm, scanned_device.clkofs, ars);
@@ -528,6 +580,19 @@ static void _read_memory(uint16_t connection_handle, address_space_t as, uint32_
   log_d("queued acl_l2cap_single_packet(read memory)");
 }
 
+static void process_connection_request_event(uint8_t len, uint8_t* data){
+  struct bd_addr_t bd_addr;
+  STREAM_TO_BDADDR(bd_addr.addr, data);
+
+  uint8_t link_type = data[9];
+  log_d("   Connection request:");
+  log_d("   Class_of_Device = %02X %02X %02X", data[6], data[7], data[8]);
+  log_d("   Link type %02X", link_type);
+  uint16_t data_len = make_cmd_accept_connection(tmp_data, bd_addr);
+  _queue_data(_tx_queue, tmp_data, data_len);
+  log_d("queued accept_connection(process_connection_request_event)");
+}
+
 static void process_connection_complete_event(uint8_t len, uint8_t* data){
   uint8_t status = data[0];
   log_d("connection_complete status=%02X", status);
@@ -543,7 +608,13 @@ static void process_connection_complete_event(uint8_t len, uint8_t* data){
   log_d("  Link_Type          = %02X", lt);
   log_d("  Encryption_Enabled = %02X", ee);
 
-  _l2cap_connect(connection_handle, PSM_HID_Control_11, _g_local_cid++);
+  // Check to see if we requested this connection
+  if (requested_connection_find(&bd_addr) >= 0) {
+    _l2cap_connect(connection_handle, PSM_HID_Control_11, _g_local_cid++);
+
+    int req_con_size = requested_connection_remove(&bd_addr);
+    log_d("remove requested connection %s, new size: %d", formatHex((uint8_t*)&bd_addr.addr, BD_ADDR_LEN), req_con_size);
+  }
 }
 
 static void process_disconnection_complete_event(uint8_t len, uint8_t* data){
@@ -880,6 +951,8 @@ static void process_hci_event(uint8_t event_code, uint8_t len, uint8_t* data){
     process_remote_name_request_complete_event(len, data);
   }else if(event_code == 0x03){
     process_connection_complete_event(len, data);
+  }else if(event_code == 0x04){
+    process_connection_request_event(len, data);
   }else if(event_code == 0x05){
     process_disconnection_complete_event(len, data);
   }else if (event_code == 0x17){
