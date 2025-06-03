@@ -457,6 +457,29 @@ static void _l2cap_connect(uint16_t connection_handle, uint16_t psm, uint16_t so
   }
 }
 
+static void _l2cap_configure(uint16_t connection_handle, uint16_t local_cid, uint16_t mtu){
+  int idx = l2cap_connection_find_by_local_cid(connection_handle, local_cid);
+  struct l2cap_connection_t *l2cap_connection = &l2cap_connection_list[idx];
+
+  uint8_t packet_boundary_flag = 0b10; // Packet_Boundary_Flag
+  uint8_t broadcast_flag = 0b00;       // Broadcast_Flag
+  uint16_t channel_id = 0x0001;
+  uint8_t data[] = {
+      0x04,                                         // CONFIGURATION REQUEST
+      _g_identifier++,                              // Identifier
+      0x08, 0x00,                                   // Length: 0x0008
+      (uint8_t)(l2cap_connection->remote_cid & 0xFF), (uint8_t)(l2cap_connection->remote_cid >> 8), // Destination CID
+      0x00, 0x00,                                   // Flags
+      0x01, 0x02,
+      (uint8_t)(mtu & 0xFF), (uint8_t)(mtu >> 8) // type=01 len=02 value=2 bytes mtu
+    };
+
+    uint16_t data_len = 12;
+    uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
+    _queue_data(_tx_queue, tmp_data, len); // TODO: check return
+    log_d("queued acl_l2cap_single_packet(l2cap configure)");
+}
+
 static void _set_rumble(uint16_t connection_handle, bool rumble){
   int idx = l2cap_connection_find_by_psm(connection_handle, PSM_HID_Interrupt_13);
   struct l2cap_connection_t l2cap_connection = l2cap_connection_list[idx];
@@ -722,22 +745,7 @@ static void process_l2cap_connection_response(uint16_t connection_handle, uint8_
     int idx = l2cap_connection_find_by_local_cid(connection_handle, source_cid);
     struct l2cap_connection_t *l2cap_connection = &l2cap_connection_list[idx];
     l2cap_connection->remote_cid = destination_cid;
-
-    uint8_t  packet_boundary_flag = 0b10; // Packet_Boundary_Flag
-    uint8_t  broadcast_flag       = 0b00; // Broadcast_Flag
-    uint16_t channel_id           = 0x0001;
-    uint8_t data[] = {
-      0x04,       // CONFIGURATION REQUEST
-      _g_identifier++, // Identifier
-      0x08, 0x00, // Length: 0x0008
-      (uint8_t)(destination_cid & 0xFF), (uint8_t)(destination_cid >> 8), // Destination CID
-      0x00, 0x00, // Flags
-      0x01, 0x02, 0x40, 0x00 // type=01 len=02 value=00 40
-    };
-    uint16_t data_len = 12;
-    uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
-    _queue_data(_tx_queue, tmp_data, len); // TODO: check return
-    log_d("queued acl_l2cap_single_packet(CONFIGURATION REQUEST)");
+    _l2cap_configure(connection_handle, source_cid, 0x0040);
   }
 }
 
@@ -756,6 +764,13 @@ static void process_l2cap_configuration_response(uint16_t connection_handle, uin
   log_d("  flags           = %04X", flags);
   log_d("  result          = %04X", result);
   log_d("  config          = %s", formatHex(data+10, len-6));
+
+  int idx = l2cap_connection_find_by_local_cid(connection_handle, source_cid);
+  struct l2cap_connection_t l2cap_connection = l2cap_connection_list[idx];
+
+  if(!l2cap_connection.initiator && l2cap_connection.psm == PSM_HID_Interrupt_13){
+    _singleton->_callback(WIIMOTE_EVENT_CONNECT, connection_handle, NULL, 0);
+  }
 }
 
 static void process_l2cap_configuration_request(uint16_t connection_handle, uint8_t* data){
@@ -805,13 +820,15 @@ static void process_l2cap_configuration_request(uint16_t connection_handle, uint
     _queue_data(_tx_queue, tmp_data, len); // TODO: check return
     log_d("queued acl_l2cap_single_packet(CONFIGURATION RESPONSE)");
 
-    if(l2cap_connection.psm == PSM_HID_Control_11){
-      if (l2cap_connection.initiator) {
+    if (l2cap_connection.initiator) {
+      if(l2cap_connection.psm == PSM_HID_Control_11){
         _l2cap_connect(connection_handle, PSM_HID_Interrupt_13, _g_local_cid++);
+      } else
+      if(l2cap_connection.psm == PSM_HID_Interrupt_13){
+        _singleton->_callback(WIIMOTE_EVENT_CONNECT, connection_handle, NULL, 0);
       }
-    }
-    if(l2cap_connection.psm == PSM_HID_Interrupt_13){
-      _singleton->_callback(WIIMOTE_EVENT_CONNECT, connection_handle, NULL, 0);
+    } else {
+      _l2cap_configure(connection_handle, l2cap_connection.local_cid, mtu);
     }
   }
 }
