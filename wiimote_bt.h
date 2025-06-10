@@ -20,6 +20,7 @@
 #define HCI_NEGATIVE_REPLY                 (0x000C | HCI_GRP_LINK_CONT_CMDS)
 #define HCI_PIN_REPLY                      (0x000D | HCI_GRP_LINK_CONT_CMDS)
 #define HCI_ACCEPT_CONNECTION              (0x0009 | HCI_GRP_LINK_CONT_CMDS)
+#define HCI_DISCONNECT                     (0x0006 | HCI_GRP_LINK_CONT_CMDS)
 
 #define BD_ADDR_LEN     (6)
 struct bd_addr_t {
@@ -179,6 +180,19 @@ static uint16_t make_cmd_accept_connection(uint8_t *buf, struct bd_addr_t bd_add
   BDADDR_TO_STREAM(buf, bd_addr.addr);
   UINT8_TO_STREAM(buf, 0);
   return HCI_H4_CMD_PREAMBLE_SIZE + 7;
+}
+
+static uint16_t make_cmd_disconnect(uint8_t *buf, uint16_t connection_handle)
+{
+  UINT8_TO_STREAM(buf, H4_TYPE_COMMAND);
+  UINT16_TO_STREAM(buf, HCI_DISCONNECT);
+  UINT8_TO_STREAM(buf, 3);
+
+  UINT8_TO_STREAM(buf, connection_handle & 0xFF);
+  UINT8_TO_STREAM(buf, (connection_handle >> 8) & 0x0F);
+
+  UINT8_TO_STREAM(buf, 0x15);
+  return HCI_H4_CMD_PREAMBLE_SIZE + 3;
 }
 
 // TODO long data is split to multi packets

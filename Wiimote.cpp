@@ -191,6 +191,26 @@ static int l2cap_connection_add(struct l2cap_connection_t l2cap_connection){
   l2cap_connection_list[l2cap_connection_size++] = l2cap_connection;
   return l2cap_connection_size;
 }
+
+static int l2cap_connection_remove_all(uint16_t handle){
+  int found=0;
+  for(int i=0; i<l2cap_connection_size; i++){
+  l2cap_connection_t *c = &l2cap_connection_list[i];
+  if(handle==c->connection_handle)
+    found++;
+  else
+    l2cap_connection_list[i-found] = l2cap_connection_list[i];
+  }
+  if(found>0){
+    l2cap_connection_size-=found;
+    return l2cap_connection_size;
+  }
+  else{
+    return -1;
+  }
+
+}
+
 static int l2cap_connection_remove(uint16_t handle, uint16_t local_cid, uint16_t remote_cid){
   int found=0;
   log_d("From l2cap connections(size:%d), removing: handle=%d, local_cid:%04x, remote_cid:%04x",l2cap_connection_size, handle, local_cid, remote_cid);
@@ -479,6 +499,32 @@ static void _l2cap_configure(uint16_t connection_handle, uint16_t local_cid, uin
     uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
     _queue_data(_tx_queue, tmp_data, len); // TODO: check return
     log_d("queued acl_l2cap_single_packet(l2cap configure)");
+}
+
+static void _l2cap_close(uint16_t connection_handle, uint16_t psm){
+  int idx = l2cap_connection_find_by_psm(connection_handle, psm);
+  if (idx < 0) {
+    log_e("Failed to find connection for handle %02X, and psm %02X", connection_handle, psm);
+    return;
+  }
+
+  struct l2cap_connection_t *l2cap_connection = &l2cap_connection_list[idx];
+
+  uint8_t packet_boundary_flag = 0b10; // Packet_Boundary_Flag
+  uint8_t broadcast_flag = 0b00;       // Broadcast_Flag
+  uint16_t channel_id = 0x0001;
+  uint8_t data[] = {
+      0x06,                                         // CLOSE REQUEST
+      _g_identifier++,                              // Identifier
+      0x04, 0x00,                                   // Length: 0x0004
+      (uint8_t)(l2cap_connection->remote_cid & 0xFF), (uint8_t)(l2cap_connection->remote_cid >> 8), // Destination CID
+      (uint8_t)(l2cap_connection->local_cid & 0xFF), (uint8_t)(l2cap_connection->local_cid >> 8), // Source CID
+    };
+
+    uint16_t data_len = 8;
+    uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
+    _queue_data(_tx_queue, tmp_data, len); // TODO: check return
+    log_d("queued acl_l2cap_single_packet(l2cap close)");
 }
 
 static void _set_rumble(uint16_t connection_handle, bool rumble){
@@ -1150,6 +1196,13 @@ void Wiimote::set_led(uint16_t handle, uint8_t leds){
 
 void Wiimote::set_rumble(uint16_t handle, bool rumble){
   _set_rumble(handle, rumble);
+}
+
+void Wiimote::disconnect(uint16_t handle){
+  l2cap_connection_remove_all(handle);
+  // Disconnect HCI
+  uint16_t len = make_cmd_disconnect(tmp_data, handle);
+  _queue_data(_tx_queue, tmp_data, len); // TODO: check return
 }
 
 void Wiimote::get_balance_weight(uint8_t *data, float *weight) {
