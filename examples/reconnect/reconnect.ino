@@ -7,29 +7,6 @@ std::vector<uint16_t> connections(0, 0);
 bool is_scanning = false;
 #define pair_button_gpio 21
 
-void setup()
-{
-  Serial.begin(115200);
-  pinMode(pair_button_gpio, INPUT_PULLUP);
-  pinMode(LED_BUILTIN, OUTPUT);
-  wii.init(wiimote_callback);
-}
-
-void loop()
-{
-  wii.handle();
-  if (digitalRead(pair_button_gpio) == LOW && !is_scanning)
-  {
-    // disconnect all
-    for (auto &wiimote : connections)
-    {
-      wii.disconnect(wiimote);
-    }
-    // scan for new
-    wii.scan(true);
-  }
-}
-
 void wiimote_callback(wiimote_event_type_t event_type, uint16_t wiimote, uint8_t *data, size_t len)
 {
   printf("len:%02X ", len);
@@ -59,17 +36,13 @@ void wiimote_callback(wiimote_event_type_t event_type, uint16_t wiimote, uint8_t
     else if (data[1] == 0x34)
     {
       printf("👟 ");
-
-      // balance boards must have LED set to 1
-      wii.set_led(wiimote, 1);
-
       for (int i = 0; i < 4; i++)
       {
         printf("%02X ", data[i]);
       }
       // https://wiibrew.org/wiki/Wii_Balance_Board#Data_Format
       uint8_t *ext = data + 4;
-      /*printf(" ... Wii Balance Board: TopRight=%d BottomRight=%d TopLeft=%d BottomLeft=%d Temperature=%d BatteryLevel=0x%02x\n",
+      /*printf("Balance Board: TopRight=%d BottomRight=%d TopLeft=%d BottomLeft=%d Temperature=%d BatteryLevel=0x%02x\n",
         ext[0] * 256 + ext[1],
         ext[2] * 256 + ext[3],
         ext[4] * 256 + ext[5],
@@ -81,11 +54,12 @@ void wiimote_callback(wiimote_event_type_t event_type, uint16_t wiimote, uint8_t
       float weight[4];
       wii.get_balance_weight(data, weight);
 
-      printf(" ... Wii Balance Board: TopRight=%f BottomRight=%f TopLeft=%f BottomLeft=%f\n",
-             weight[BALANCE_POSITION_TOP_RIGHT],
-             weight[BALANCE_POSITION_BOTTOM_RIGHT],
+      printf("↖️ %6.3f  ↗️ %6.3f  ↙️ %6.3f  ↘️ %6.3f  🔋:0x%02x\n",
              weight[BALANCE_POSITION_TOP_LEFT],
-             weight[BALANCE_POSITION_BOTTOM_LEFT]);
+             weight[BALANCE_POSITION_TOP_RIGHT],
+             weight[BALANCE_POSITION_BOTTOM_LEFT],
+             weight[BALANCE_POSITION_BOTTOM_RIGHT],
+             ext[10]);
     }
     else
     {
@@ -143,8 +117,8 @@ void wiimote_callback(wiimote_event_type_t event_type, uint16_t wiimote, uint8_t
   }
   else if (event_type == WIIMOTE_EVENT_CONNECT)
   {
-    connections.push_back(wiimote);
     wii.set_led(wiimote, 1 << connections.size());
+    connections.push_back(wiimote);
     printf("✅ Connected Wiimote. Connections:%d\n", connections.size());
   }
   else if (event_type == WIIMOTE_EVENT_DISCONNECT)
@@ -160,5 +134,28 @@ void wiimote_callback(wiimote_event_type_t event_type, uint16_t wiimote, uint8_t
   else
   {
     printf("🤷🏻‍♂️ event_type=%d\n", event_type);
+  }
+}
+
+void setup()
+{
+  Serial.begin(115200);
+  pinMode(pair_button_gpio, INPUT_PULLUP);
+  pinMode(LED_BUILTIN, OUTPUT);
+  wii.init(wiimote_callback);
+}
+
+void loop()
+{
+  wii.handle();
+  if (digitalRead(pair_button_gpio) == LOW && !is_scanning)
+  {
+    // disconnect all
+    for (auto &wiimote : connections)
+    {
+      wii.disconnect(wiimote);
+    }
+    // scan for new
+    wii.scan(true);
   }
 }
