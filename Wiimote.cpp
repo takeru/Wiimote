@@ -3,6 +3,7 @@
 #include <freertos/queue.h>
 #include <esp32-hal-log.h>
 #include <esp32-hal-bt.h>
+#include <esp_mac.h>
 
 #if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
 #error Bluetooth is not enabled! Please run `make menuconfig` to and enable it
@@ -23,7 +24,7 @@ static Wiimote *_singleton = NULL;
 static uint8_t tmp_data[256];
 static bool wiimoteConnected = false;
 static uint8_t _g_identifier = 1;
-static uint16_t _g_local_cid = 0x0040;
+static uint16_t _g_local_cid = 0x0030;
 
 static uint16_t balance_calibration[12];
 
@@ -74,6 +75,54 @@ static char* formatHex(uint8_t* data, uint16_t len){
 }
 
 /**
+ * Requested connections list
+ */
+struct requested_connection_t {
+  bd_addr_t bd_addr;
+};
+static int requested_connection_list_size = 0;
+#define REQUESTED_CONNECTION_LIST_SIZE 16
+static requested_connection_t requested_connection_list[REQUESTED_CONNECTION_LIST_SIZE];
+
+static int requested_connection_add(struct requested_connection_t requested_connection){
+  if(REQUESTED_CONNECTION_LIST_SIZE == requested_connection_list_size){
+    return -1;
+  }
+  requested_connection_list[requested_connection_list_size++] = requested_connection;
+  return requested_connection_list_size;
+}
+static int requested_connection_find(struct bd_addr_t *bd_addr){
+  for(int i=0; i<requested_connection_list_size; i++){
+    requested_connection_t *c = &requested_connection_list[i];
+    if(memcmp(&bd_addr->addr, c->bd_addr.addr, BD_ADDR_LEN) == 0){
+      return i;
+    }
+  }
+  return -1;
+}
+static int requested_connection_remove(struct bd_addr_t *bd_addr){
+  int found=0;
+  for(int i=0; i<requested_connection_list_size; i++){
+    requested_connection_t *c = &requested_connection_list[i];
+    if(memcmp(&bd_addr->addr, c->bd_addr.addr, BD_ADDR_LEN) == 0){
+      found++;
+    }else{
+      requested_connection_list[i-found] = requested_connection_list[i];
+    }
+  }
+  if(found>0){
+    requested_connection_list_size-=found;
+    return requested_connection_list_size;
+  }
+  else{
+    return -1;
+  }
+}
+static void requested_connection_clear(void){
+  requested_connection_list_size = 0;
+}
+
+ /**
  * Scanned device list
  */
 struct scanned_device_t {
@@ -112,6 +161,7 @@ struct l2cap_connection_t {
   uint16_t psm;
   uint16_t local_cid;
   uint16_t remote_cid;
+  bool initiator;
 };
 static int l2cap_connection_size = 0;
 #define L2CAP_CONNECTION_LIST_SIZE 8
@@ -134,7 +184,6 @@ static int l2cap_connection_find_by_local_cid(uint16_t connection_handle, uint16
   }
   return -1;
 }
-
 static int l2cap_connection_add(struct l2cap_connection_t l2cap_connection){
   if(L2CAP_CONNECTION_LIST_SIZE == l2cap_connection_size){
     return -1;
@@ -142,6 +191,46 @@ static int l2cap_connection_add(struct l2cap_connection_t l2cap_connection){
   l2cap_connection_list[l2cap_connection_size++] = l2cap_connection;
   return l2cap_connection_size;
 }
+
+static int l2cap_connection_remove_all(uint16_t handle){
+  int found=0;
+  for(int i=0; i<l2cap_connection_size; i++){
+  l2cap_connection_t *c = &l2cap_connection_list[i];
+  if(handle==c->connection_handle)
+    found++;
+  else
+    l2cap_connection_list[i-found] = l2cap_connection_list[i];
+  }
+  if(found>0){
+    l2cap_connection_size-=found;
+    return l2cap_connection_size;
+  }
+  else{
+    return -1;
+  }
+
+}
+
+static int l2cap_connection_remove(uint16_t handle, uint16_t local_cid, uint16_t remote_cid){
+  int found=0;
+  log_d("From l2cap connections(size:%d), removing: handle=%d, local_cid:%04x, remote_cid:%04x",l2cap_connection_size, handle, local_cid, remote_cid);
+  for(int i=0; i<l2cap_connection_size; i++){
+    l2cap_connection_t *c = &l2cap_connection_list[i];
+    if(handle==c->connection_handle && local_cid==c->local_cid && remote_cid==c->remote_cid)
+      found++;
+    else
+      l2cap_connection_list[i-found] = l2cap_connection_list[i];
+  }
+  if(found>0){
+    l2cap_connection_size-=found;
+    return l2cap_connection_size;
+  }
+  else{
+    return -1;
+  }
+  
+}
+
 static void l2cap_connection_clear(void){
   l2cap_connection_size = 0;
 }
@@ -349,6 +438,10 @@ static void process_remote_name_request_complete_event(uint8_t len, uint8_t* dat
   int idx = scanned_device_find(&bd_addr);
   if(0<=idx && (strcmp("Nintendo RVL-CNT-01", name)==0 || strcmp("Nintendo RVL-WBC-01", name)==0)){
     struct scanned_device_t scanned_device = scanned_device_list[idx];
+    struct requested_connection_t requested_connection;
+    requested_connection.bd_addr = bd_addr;
+    requested_connection_add(requested_connection);
+
     uint16_t pt = 0x0008;
     uint8_t ars = 0x00;
     uint16_t len = make_cmd_create_connection(tmp_data, scanned_device.bd_addr, pt, scanned_device.psrm, scanned_device.clkofs, ars);
@@ -365,8 +458,8 @@ static void _l2cap_connect(uint16_t connection_handle, uint16_t psm, uint16_t so
     0x02,                               // CONNECTION REQUEST
     _g_identifier++,                    // Identifier
     0x04, 0x00,                         // Length:     0x0004
-    psm        & 0xFF, psm        >> 8, // PSM: HID_Control=0x0011, HID_Interrupt=0x0013
-    source_cid & 0xFF, source_cid >> 8  // Source CID: 0x0040+
+    (uint8_t)(psm & 0xFF), (uint8_t)(psm >> 8), // PSM: HID_Control=0x0011, HID_Interrupt=0x0013
+    (uint8_t)(source_cid & 0xFF), (uint8_t)(source_cid >> 8)  // Source CID: 0x0040+
   };
   uint16_t data_len = 8;
   uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
@@ -378,10 +471,60 @@ static void _l2cap_connect(uint16_t connection_handle, uint16_t psm, uint16_t so
   l2cap_connection.psm               = psm;
   l2cap_connection.local_cid         = source_cid;
   l2cap_connection.remote_cid        = 0;
+  l2cap_connection.initiator         = true;
   int idx = l2cap_connection_add(l2cap_connection);
   if(idx == -1){
     log_d("!!! l2cap_connection_add failed.");
   }
+}
+
+static void _l2cap_configure(uint16_t connection_handle, uint16_t local_cid, uint16_t mtu){
+  int idx = l2cap_connection_find_by_local_cid(connection_handle, local_cid);
+  struct l2cap_connection_t *l2cap_connection = &l2cap_connection_list[idx];
+
+  uint8_t packet_boundary_flag = 0b10; // Packet_Boundary_Flag
+  uint8_t broadcast_flag = 0b00;       // Broadcast_Flag
+  uint16_t channel_id = 0x0001;
+  uint8_t data[] = {
+      0x04,                                         // CONFIGURATION REQUEST
+      _g_identifier++,                              // Identifier
+      0x08, 0x00,                                   // Length: 0x0008
+      (uint8_t)(l2cap_connection->remote_cid & 0xFF), (uint8_t)(l2cap_connection->remote_cid >> 8), // Destination CID
+      0x00, 0x00,                                   // Flags
+      0x01, 0x02,
+      (uint8_t)(mtu & 0xFF), (uint8_t)(mtu >> 8) // type=01 len=02 value=2 bytes mtu
+    };
+
+    uint16_t data_len = 12;
+    uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
+    _queue_data(_tx_queue, tmp_data, len); // TODO: check return
+    log_d("queued acl_l2cap_single_packet(l2cap configure)");
+}
+
+static void _l2cap_close(uint16_t connection_handle, uint16_t psm){
+  int idx = l2cap_connection_find_by_psm(connection_handle, psm);
+  if (idx < 0) {
+    log_e("Failed to find connection for handle %02X, and psm %02X", connection_handle, psm);
+    return;
+  }
+
+  struct l2cap_connection_t *l2cap_connection = &l2cap_connection_list[idx];
+
+  uint8_t packet_boundary_flag = 0b10; // Packet_Boundary_Flag
+  uint8_t broadcast_flag = 0b00;       // Broadcast_Flag
+  uint16_t channel_id = 0x0001;
+  uint8_t data[] = {
+      0x06,                                         // CLOSE REQUEST
+      _g_identifier++,                              // Identifier
+      0x04, 0x00,                                   // Length: 0x0004
+      (uint8_t)(l2cap_connection->remote_cid & 0xFF), (uint8_t)(l2cap_connection->remote_cid >> 8), // Destination CID
+      (uint8_t)(l2cap_connection->local_cid & 0xFF), (uint8_t)(l2cap_connection->local_cid >> 8), // Source CID
+    };
+
+    uint16_t data_len = 8;
+    uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
+    _queue_data(_tx_queue, tmp_data, len); // TODO: check return
+    log_d("queued acl_l2cap_single_packet(l2cap close)");
 }
 
 static void _set_rumble(uint16_t connection_handle, bool rumble){
@@ -394,7 +537,7 @@ static void _set_rumble(uint16_t connection_handle, bool rumble){
   uint8_t data[] = {
     0xA2,
     0x10,
-    rumble ? 0x01 : 0x00 // 0x0? - 0xF?
+    (uint8_t)(rumble ? 0x01 : 0x00) // 0x0? - 0xF?
   };
   uint16_t data_len = 3;
   uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
@@ -412,7 +555,7 @@ static void _set_led(uint16_t connection_handle, uint8_t leds){
   uint8_t data[] = {
     0xA2,
     0x11,
-    leds << 4 // 0x0? - 0xF?
+    (uint8_t)(leds << 4) // 0x0? - 0xF?
   };
   uint16_t data_len = 3;
   uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
@@ -430,13 +573,19 @@ static void _set_reporting_mode(uint16_t connection_handle, uint8_t reporting_mo
   uint8_t data[] = {
     0xA2,
     0x12,
-    continuous ? 0x04 : 0x00, // 0x00, 0x04
+    (uint8_t)(continuous ? 0x04 : 0x00), // 0x00, 0x04
     reporting_mode
   };
   uint16_t data_len = 4;
   uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
   _queue_data(_tx_queue, tmp_data, len); // TODO: check return
   log_d("queued acl_l2cap_single_packet(Set reporting mode)");
+}
+
+static void _initiate_auth(uint16_t handle) {
+  uint16_t data_len = make_cmd_auth_request(tmp_data, handle);
+  _queue_data(_tx_queue, tmp_data, data_len);
+  log_d("queued auth request(initiate auth)");
 }
 
 enum address_space_t {
@@ -464,9 +613,9 @@ static void _write_memory(uint16_t connection_handle, address_space_t as, uint32
     0xA2,
     0x16, // Write
     _address_space(as),    // MM 0x00=EEPROM, 0x04=ControlRegister
-    (offset >> 16) & 0xFF, // FF
-    (offset >>  8) & 0xFF, // FF
-    (offset      ) & 0xFF, // FF
+    (uint8_t)((offset >> 16) & 0xFF), // FF
+    (uint8_t)((offset >>  8) & 0xFF), // FF
+    (uint8_t)((offset      ) & 0xFF), // FF
     size,                  // SS size 1..16
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
@@ -491,16 +640,29 @@ static void _read_memory(uint16_t connection_handle, address_space_t as, uint32_
     0xA2,
     0x17, // Read
     _address_space(as),    // MM 0x00=EEPROM, 0x04=ControlRegister
-    (offset >> 16) & 0xFF, // FF
-    (offset >>  8) & 0xFF, // FF
-    (offset      ) & 0xFF, // FF
-    (size >> 8   ) & 0xFF, // SS
-    (size        ) & 0xFF  // SS
+    (uint8_t)((offset >> 16) & 0xFF), // FF
+    (uint8_t)((offset >>  8) & 0xFF), // FF
+    (uint8_t)((offset      ) & 0xFF), // FF
+    (uint8_t)((size >> 8   ) & 0xFF), // SS
+    (uint8_t)((size        ) & 0xFF)  // SS
   };
   uint16_t data_len = 8;
   uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
   _queue_data(_tx_queue, tmp_data, len); // TODO: check return
   log_d("queued acl_l2cap_single_packet(read memory)");
+}
+
+static void process_connection_request_event(uint8_t len, uint8_t* data){
+  struct bd_addr_t bd_addr;
+  STREAM_TO_BDADDR(bd_addr.addr, data);
+
+  uint8_t link_type = data[9];
+  log_d("   Connection request:");
+  log_d("   Class_of_Device = %02X %02X %02X", data[6], data[7], data[8]);
+  log_d("   Link type %02X", link_type);
+  uint16_t data_len = make_cmd_accept_connection(tmp_data, bd_addr);
+  _queue_data(_tx_queue, tmp_data, data_len);
+  log_d("queued accept_connection(process_connection_request_event)");
 }
 
 static void process_connection_complete_event(uint8_t len, uint8_t* data){
@@ -518,7 +680,13 @@ static void process_connection_complete_event(uint8_t len, uint8_t* data){
   log_d("  Link_Type          = %02X", lt);
   log_d("  Encryption_Enabled = %02X", ee);
 
-  _l2cap_connect(connection_handle, PSM_HID_Control_11, _g_local_cid++);
+  // Check to see if we requested this connection
+  if (requested_connection_find(&bd_addr) >= 0) {
+    _l2cap_connect(connection_handle, PSM_HID_Control_11, _g_local_cid++);
+
+    int req_con_size = requested_connection_remove(&bd_addr);
+    log_d("remove requested connection %s, new size: %d", formatHex((uint8_t*)&bd_addr.addr, BD_ADDR_LEN), req_con_size);
+  }
 }
 
 static void process_disconnection_complete_event(uint8_t len, uint8_t* data){
@@ -532,6 +700,77 @@ static void process_disconnection_complete_event(uint8_t len, uint8_t* data){
   log_d("  Reason             = %02X", reason);
 
   _singleton->_callback(WIIMOTE_EVENT_DISCONNECT, ch, NULL, 0);
+}
+
+static void process_link_key_request_event(uint8_t len, uint8_t* data) {
+  struct bd_addr_t bd_addr;
+  STREAM_TO_BDADDR(bd_addr.addr, data);
+  uint16_t data_len = make_cmd_negative_reply(tmp_data, bd_addr);
+  _queue_data(_tx_queue, tmp_data, data_len);
+  log_d("queued negative link key reply(process_link_key_request)");
+}
+
+static void process_pin_request_event(uint8_t len, uint8_t *data) {
+  struct bd_addr_t bd_addr;
+  STREAM_TO_BDADDR(bd_addr.addr, data);
+  uint8_t pin_data[6];
+
+  // The pin is the mac of the host controller reversed
+  esp_read_mac(pin_data, ESP_MAC_BT);
+  for (size_t i = 0; i < 3; ++i)
+  {
+    uint8_t tmp = pin_data[5 - i];
+    pin_data[5 - i] = pin_data[i];
+    pin_data[i] = tmp;
+  }
+  log_d("Pin data=%s", formatHex(pin_data, 6));
+  uint16_t data_len = make_cmd_pin_reply(tmp_data, bd_addr, pin_data);
+  _queue_data(_tx_queue, tmp_data, data_len);
+  log_d("queued pin reply(process_pin_request)");
+}
+
+static void process_l2cap_connection_request(uint16_t connection_handle, uint8_t *data)
+{
+  uint16_t source_cid = (data[7] << 8) | data[6];
+  uint16_t psm = (data[5] << 8) | data[4];
+  struct l2cap_connection_t l2cap_connection;
+  l2cap_connection.connection_handle = connection_handle;
+  l2cap_connection.psm = psm;
+  l2cap_connection.remote_cid = source_cid;
+  l2cap_connection.local_cid = _g_local_cid++;
+  l2cap_connection.initiator = false;
+
+  log_d("L2CAP CONNECTION REQUEST");
+  log_d("  identifier      = %02X", data[1]);
+  log_d("  local_cid = %04X", l2cap_connection.local_cid);
+  log_d("  remote_cid      = %04X", source_cid);
+  log_d("  psm          = %04X", psm);
+
+  int idx = l2cap_connection_add(l2cap_connection);
+  if (idx == -1)
+  {
+    log_d("!!! failed to add l2cap_connection.");
+  }
+
+  uint16_t result = idx != -1? 0x00 : 0x04; // Connection refused if idx == -1.
+  uint8_t response_data[] = {
+      0x03,
+      data[1], // Request identifier
+      0x08, 0x00,
+      (uint8_t)(l2cap_connection.local_cid & 0xFF), (uint8_t)(l2cap_connection.local_cid >> 8),
+      (uint8_t)(l2cap_connection.remote_cid & 0xFF), (uint8_t)(l2cap_connection.remote_cid >> 8),
+      (uint8_t)(result & 0xFF), (uint8_t)(result >> 8),
+      0x00, 0x00, // No status
+  };
+
+  uint8_t packet_boundary_flag = 0b10;
+  uint8_t broadcast_flag = 0b00;
+  uint16_t channel_id = 1;
+
+  uint16_t data_len = 12;
+  uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, response_data, data_len);
+  _queue_data(_tx_queue, tmp_data, len);
+  log_d("queued acl_l2cap_single_packet(CONNECTION RESPONSE)");
 }
 
 static void process_l2cap_connection_response(uint16_t connection_handle, uint8_t* data){
@@ -553,22 +792,7 @@ static void process_l2cap_connection_response(uint16_t connection_handle, uint8_
     int idx = l2cap_connection_find_by_local_cid(connection_handle, source_cid);
     struct l2cap_connection_t *l2cap_connection = &l2cap_connection_list[idx];
     l2cap_connection->remote_cid = destination_cid;
-
-    uint8_t  packet_boundary_flag = 0b10; // Packet_Boundary_Flag
-    uint8_t  broadcast_flag       = 0b00; // Broadcast_Flag
-    uint16_t channel_id           = 0x0001;
-    uint8_t data[] = {
-      0x04,       // CONFIGURATION REQUEST
-      _g_identifier++, // Identifier
-      0x08, 0x00, // Length: 0x0008
-      destination_cid & 0xFF, destination_cid >> 8, // Destination CID
-      0x00, 0x00, // Flags
-      0x01, 0x02, 0x40, 0x00 // type=01 len=02 value=00 40
-    };
-    uint16_t data_len = 12;
-    uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
-    _queue_data(_tx_queue, tmp_data, len); // TODO: check return
-    log_d("queued acl_l2cap_single_packet(CONFIGURATION REQUEST)");
+    _l2cap_configure(connection_handle, source_cid, 0x0040);
   }
 }
 
@@ -587,6 +811,13 @@ static void process_l2cap_configuration_response(uint16_t connection_handle, uin
   log_d("  flags           = %04X", flags);
   log_d("  result          = %04X", result);
   log_d("  config          = %s", formatHex(data+10, len-6));
+
+  int idx = l2cap_connection_find_by_local_cid(connection_handle, source_cid);
+  struct l2cap_connection_t l2cap_connection = l2cap_connection_list[idx];
+
+  if(!l2cap_connection.initiator && l2cap_connection.psm == PSM_HID_Interrupt_13){
+    _singleton->_callback(WIIMOTE_EVENT_CONNECT, connection_handle, NULL, 0);
+  }
 }
 
 static void process_l2cap_configuration_request(uint16_t connection_handle, uint8_t* data){
@@ -626,23 +857,50 @@ static void process_l2cap_configuration_request(uint16_t connection_handle, uint
       0x05,       // CONFIGURATION RESPONSE
       identifier, // Identifier
       0x0A, 0x00, // Length: 0x000A
-      source_cid & 0xFF, source_cid >> 8, // Source CID
+      (uint8_t)(source_cid & 0xFF), (uint8_t)(source_cid >> 8), // Source CID
       0x00, 0x00, // Flags
       0x00, 0x00, // Res
-      0x01, 0x02, mtu & 0xFF, mtu >> 8 // type=01 len=02 value=xx xx
+      0x01, 0x02, (uint8_t)(mtu & 0xFF), (uint8_t)(mtu >> 8) // type=01 len=02 value=xx xx
     };
     uint16_t data_len = 14;
     uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
     _queue_data(_tx_queue, tmp_data, len); // TODO: check return
     log_d("queued acl_l2cap_single_packet(CONFIGURATION RESPONSE)");
 
-    if(l2cap_connection.psm == PSM_HID_Control_11){
-      _l2cap_connect(connection_handle, PSM_HID_Interrupt_13, _g_local_cid++);
-    }
-    if(l2cap_connection.psm == PSM_HID_Interrupt_13){
-      _singleton->_callback(WIIMOTE_EVENT_CONNECT, connection_handle, NULL, 0);
+    if (l2cap_connection.initiator) {
+      if(l2cap_connection.psm == PSM_HID_Control_11){
+        _singleton->_callback(WIIMOTE_EVENT_NEW, connection_handle, NULL, 0);
+        _l2cap_connect(connection_handle, PSM_HID_Interrupt_13, _g_local_cid++);
+      } else
+      if(l2cap_connection.psm == PSM_HID_Interrupt_13){
+        _singleton->_callback(WIIMOTE_EVENT_CONNECT, connection_handle, NULL, 0);
+      }
+    } else {
+      _l2cap_configure(connection_handle, l2cap_connection.local_cid, mtu);
     }
   }
+}
+
+static void process_l2cap_connection_close(uint16_t connection_handle, uint8_t* data){
+    // [D][Wiimote.cpp:796] process_acl_data(): **** ACL_DATA len=16 data=81 20 0C 00 08 00 01 00 06 5C 04 00 32 00 7A 00 
+    // [D][Wiimote.cpp:789] process_l2cap_data():   ### process_l2cap_data no impl ###
+    // [D][Wiimote.cpp:790] process_l2cap_data():   L2CAP len=8 data=06 5C 04 00 32 00 7A 00 
+    // [D][Wiimote.cpp:796] process_acl_data(): **** ACL_DATA len=16 data=81 20 0C 00 08 00 01 00 06 5D 04 00 33 00 7B 00 
+    // [D][Wiimote.cpp:789] process_l2cap_data():   ### process_l2cap_data no impl ###
+    // [D][Wiimote.cpp:790] process_l2cap_data():   L2CAP len=8 data=06 5D 04 00 33 00 7B 00 
+
+  uint16_t source_cid = (data[ 5] << 8) | data[ 4];
+  uint16_t destination_cid = (data[ 7] << 8) | data[ 6];
+  log_d("L2CAP CONNECTION CLOSE");
+  log_d("  handle          = %02X", connection_handle);
+  log_d("  destination_cid = %04X", destination_cid);
+  log_d("  souce_cid       = %04X", source_cid);
+
+  int rel = l2cap_connection_remove(connection_handle, source_cid, destination_cid);
+  if(rel==-1)
+    log_d(" l2cap_connection_remove failed.");
+  else
+    log_d(" l2cap_connection_remove success, l2cap_connection_size = %d.", rel);
 }
 
 static void process_report(uint16_t connection_handle, uint8_t* data, uint16_t len){
@@ -745,6 +1003,9 @@ static void process_extension_controller_reports(uint16_t connection_handle, uin
 }
 
 static void process_l2cap_data(uint16_t connection_handle, uint16_t channel_id, uint8_t* data, uint16_t len){
+  if(data[0]==0x02){ // CONNECTION REQUEST
+    process_l2cap_connection_request(connection_handle, data);
+  }else
   if(data[0]==0x03){ // CONNECTION RESPONSE
     process_l2cap_connection_response(connection_handle, data);
   }else
@@ -757,6 +1018,9 @@ static void process_l2cap_data(uint16_t connection_handle, uint16_t channel_id, 
   if(data[0]==0xA1){ // HID 0xA1
     process_extension_controller_reports(connection_handle, channel_id, data, len);
     process_report(connection_handle, data, len);
+  }else
+  if(data[0]==0x06){ // CONNECTION CLOSING ? (Aqee)
+    process_l2cap_connection_close(connection_handle, data);
   }else{
     log_d("  ### process_l2cap_data no impl ###");
     log_d("  L2CAP len=%d data=%s", len, formatHex(data, len));
@@ -803,8 +1067,14 @@ static void process_hci_event(uint8_t event_code, uint8_t len, uint8_t* data){
     process_remote_name_request_complete_event(len, data);
   }else if(event_code == 0x03){
     process_connection_complete_event(len, data);
+  }else if(event_code == 0x04){
+    process_connection_request_event(len, data);
   }else if(event_code == 0x05){
     process_disconnection_complete_event(len, data);
+  }else if (event_code == 0x17){
+    process_link_key_request_event(len, data);
+  }else if (event_code == 0x16){
+    process_pin_request_event(len, data);
   }else if(event_code == 0x13){
     log_d("  (Number Of Completed Packets Event)");
   }else if(event_code == 0x0D){
@@ -928,6 +1198,13 @@ void Wiimote::set_rumble(uint16_t handle, bool rumble){
   _set_rumble(handle, rumble);
 }
 
+void Wiimote::disconnect(uint16_t handle){
+  l2cap_connection_remove_all(handle);
+  // Disconnect HCI
+  uint16_t len = make_cmd_disconnect(tmp_data, handle);
+  _queue_data(_tx_queue, tmp_data, len); // TODO: check return
+}
+
 void Wiimote::get_balance_weight(uint8_t *data, float *weight) {
   uint8_t* ext = data+4;
 
@@ -942,4 +1219,8 @@ void Wiimote::get_balance_weight(uint8_t *data, float *weight) {
   weight[BALANCE_POSITION_BOTTOM_RIGHT] = balance_interpolate(BALANCE_POSITION_BOTTOM_RIGHT, values, balance_calibration);
   weight[BALANCE_POSITION_TOP_LEFT]     = balance_interpolate(BALANCE_POSITION_TOP_LEFT, values, balance_calibration);
   weight[BALANCE_POSITION_BOTTOM_LEFT]  = balance_interpolate(BALANCE_POSITION_BOTTOM_LEFT, values, balance_calibration);
+}
+
+void Wiimote::initiate_auth(uint16_t handle) {
+  _initiate_auth(handle);
 }

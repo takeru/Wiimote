@@ -7,6 +7,7 @@ enum wiimote_event_type_t {
   WIIMOTE_EVENT_INITIALIZE,
   WIIMOTE_EVENT_SCAN_START,
   WIIMOTE_EVENT_SCAN_STOP,
+  WIIMOTE_EVENT_NEW,
   WIIMOTE_EVENT_CONNECT,
   WIIMOTE_EVENT_DISCONNECT,
   WIIMOTE_EVENT_DATA
@@ -31,6 +32,8 @@ class Wiimote {
     void set_led(uint16_t handle, uint8_t leds);
     void set_rumble(uint16_t handle, bool rumble);
     void get_balance_weight(uint8_t *data, float *weight);
+    void initiate_auth(uint16_t handle);
+    void disconnect(uint16_t handle);
   private:
     wiimote_callback_t _wiimote_callback;
 };
